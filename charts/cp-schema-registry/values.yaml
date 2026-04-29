@@ -182,6 +182,41 @@ prometheus:
     resources: {}
 
 # ---------------------------------------------------------------------------
+# Ingress
+# Disabled by default. Enable for ALB (or nginx) Ingress Controller access.
+# When enabled alongside service.type: ClusterIP, the Ingress controller
+# handles external exposure and TLS — no LoadBalancer Service is created.
+#
+# Example (AWS ALB):
+#   ingress:
+#     enabled: true
+#     ingressClassName: alb
+#     annotations:
+#       alb.ingress.kubernetes.io/scheme: internal
+#       alb.ingress.kubernetes.io/target-type: ip
+#       alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:..."
+#       external-dns.alpha.kubernetes.io/hostname: "schema-registry.internal.example.com"
+#     hosts:
+#       - host: schema-registry.internal.example.com
+#         paths:
+#           - path: /
+#             pathType: Prefix
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  ingressClassName: ""
+  annotations: {}
+  hosts: []
+  #  - host: schema-registry.internal.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
+  tls: []
+  #  - secretName: schema-registry-tls
+  #    hosts:
+  #      - schema-registry.internal.example.com
+
+# ---------------------------------------------------------------------------
 # Scheduling
 # ---------------------------------------------------------------------------
 nodeSelector: {}

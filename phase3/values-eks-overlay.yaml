@@ -21,7 +21,7 @@ replicaCount: 3
 
 image:
   repository: confluentinc/cp-schema-registry
-  tag: "7.7.1"
+  tag: "8.2.0"
   pullPolicy: IfNotPresent
 
 # Production JVM heap with G1GC tuning

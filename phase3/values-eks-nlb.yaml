@@ -1,0 +1,114 @@
+# =============================================================================
+# EKS Exposure — Strategy A: Internal NLB + external-dns + ACM
+#
+# Prerequisites in the cluster:
+#   - AWS Load Balancer Controller  (github.com/kubernetes-sigs/aws-load-balancer-controller)
+#   - external-dns configured for Route 53  (github.com/kubernetes-sigs/external-dns)
+#   - ACM certificate covering your hostname (can be a wildcard: *.internal.example.com)
+#
+# What this file does:
+#   - Creates an AWS Network Load Balancer (internal, Layer 4)
+#   - TLS is terminated at the NLB using an ACM certificate (HTTPS → HTTP backend)
+#   - external-dns reads the Service annotation and creates a Route 53 A-alias record
+#   - Schema Registry pods are targeted by IP (nlb-target-type: ip), not by node port
+#
+# When to choose NLB over ALB Ingress:
+#   - Schema Registry serves plain HTTP/1.1 — NLB works fine at Layer 4
+#   - You want a dedicated endpoint per service (no shared ALB listeners)
+#   - You need PrivateLink / VPC endpoint support in the future
+#   - Simpler setup: no Ingress resource, just a Service
+#
+# Apply as a third overlay layer:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace kafka \
+#     -f phase1/values.yaml \
+#     -f phase3/values-eks-overlay.yaml \
+#     -f phase3/values-eks-nlb.yaml
+#
+# After deploy, check the NLB hostname:
+#   kubectl get svc schema-registry-cp-schema-registry -n kafka \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+#
+# DNS record (created automatically by external-dns within ~30s):
+#   schema-registry.internal.example.com → ALIAS → <nlb-hostname>
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Service — internal NLB via AWS Load Balancer Controller
+#
+# Key annotations explained:
+#
+#   aws-load-balancer-type: "external"
+#     Use the AWS LBC (not the legacy in-tree controller).
+#     Required when AWS LBC is installed; "nlb" is the legacy annotation.
+#
+#   aws-load-balancer-nlb-target-type: "ip"
+#     Route traffic directly to pod IPs (bypasses kube-proxy / NodePort).
+#     Requires VPC CNI (aws-node). More efficient than "instance" target type.
+#
+#   aws-load-balancer-scheme: "internal"
+#     NLB is only reachable within the VPC. Never expose Schema Registry publicly.
+#
+#   aws-load-balancer-ssl-cert
+#     ACM certificate ARN. NLB terminates TLS; backend receives plain HTTP on :8081.
+#     Use a wildcard cert (*.internal.example.com) or a specific cert for this host.
+#
+#   aws-load-balancer-ssl-ports: "443"
+#     Only HTTPS listener on port 443; HTTP (80) is NOT opened.
+#
+#   aws-load-balancer-backend-protocol: "http"
+#     Tell the NLB that the backend speaks HTTP (not HTTPS).
+#     Schema Registry serves plain HTTP on port 8081.
+#
+#   aws-load-balancer-healthcheck-path: "/subjects"
+#     NLB health check path. If Basic auth is enabled this returns 401 —
+#     that is still a valid TCP response, so the NLB treats the target as healthy.
+#     Alternatively set to "/" which returns 404 (also valid for TCP health checks).
+#
+#   external-dns.alpha.kubernetes.io/hostname
+#     external-dns reads this annotation and creates / updates a Route 53
+#     ALIAS record pointing to the NLB DNS name.
+#     Replace with your actual Route 53 hosted zone domain.
+#
+#   external-dns.alpha.kubernetes.io/ttl: "60"
+#     Route 53 record TTL in seconds. 60s is a good default for services
+#     that may failover; increase for stable endpoints to reduce DNS queries.
+# ---------------------------------------------------------------------------
+service:
+  type: LoadBalancer
+  port: 8081
+  annotations:
+    # ── AWS Load Balancer Controller ──────────────────────────────────────────
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+
+    # ── TLS — NLB terminates HTTPS, forwards HTTP to pods ────────────────────
+    # Replace the ARN with your ACM certificate for this hostname.
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+
+    # ── Health check ──────────────────────────────────────────────────────────
+    # TCP health check on port 8081 (works with or without Basic auth).
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "TCP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8081"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "10"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-healthy-threshold: "2"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-unhealthy-threshold: "2"
+
+    # ── Cross-zone load balancing ─────────────────────────────────────────────
+    # Distribute traffic evenly across all AZs even if pod counts differ.
+    service.beta.kubernetes.io/aws-load-balancer-attributes: "load_balancing.cross_zone.enabled=true"
+
+    # ── external-dns ──────────────────────────────────────────────────────────
+    # Replace with your actual hostname (must be within a Route 53 hosted zone
+    # that external-dns is configured to manage).
+    external-dns.alpha.kubernetes.io/hostname: "schema-registry.internal.example.com"
+    external-dns.alpha.kubernetes.io/ttl: "60"
+
+# ---------------------------------------------------------------------------
+# Ingress — disabled for NLB approach (Service handles exposure directly)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false

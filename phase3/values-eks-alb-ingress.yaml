@@ -1,0 +1,130 @@
+# =============================================================================
+# EKS Exposure — Strategy B: Internal ALB Ingress + external-dns + ACM
+#
+# Prerequisites in the cluster:
+#   - AWS Load Balancer Controller  (github.com/kubernetes-sigs/aws-load-balancer-controller)
+#   - external-dns configured for Route 53  (github.com/kubernetes-sigs/external-dns)
+#   - ACM certificate covering your hostname (can be a wildcard: *.internal.example.com)
+#
+# What this file does:
+#   - Creates an AWS Application Load Balancer (internal, Layer 7)
+#   - HTTPS listener on :443 with ACM cert; HTTP :80 redirects to HTTPS
+#   - ALB routes traffic to Schema Registry pods by IP (target-type: ip)
+#   - external-dns reads the Ingress hostname and creates a Route 53 CNAME/ALIAS record
+#   - Service remains ClusterIP (no LoadBalancer Service needed)
+#
+# When to choose ALB Ingress over NLB:
+#   - You want to share one ALB across multiple services (cost saving)
+#   - You need host-based or path-based routing rules
+#   - You need HTTP → HTTPS redirect at the load balancer
+#   - You need WAF integration (AWS WAF only attaches to ALB, not NLB)
+#
+# Apply as a third overlay layer:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace kafka \
+#     -f phase1/values.yaml \
+#     -f phase3/values-eks-overlay.yaml \
+#     -f phase3/values-eks-alb-ingress.yaml
+#
+# After deploy, check the ALB hostname:
+#   kubectl get ingress schema-registry-cp-schema-registry -n kafka \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+#
+# DNS record (created automatically by external-dns within ~30s):
+#   schema-registry.internal.example.com → CNAME → <alb-hostname>
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Service — ClusterIP only; the ALB routes directly to pod IPs
+# (with target-type: ip the ALB bypasses the Service entirely at the data plane)
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Ingress — internal ALB via AWS Load Balancer Controller
+#
+# Key annotations explained:
+#
+#   kubernetes.io/ingress.class: "alb"
+#     Tells the AWS LBC to provision an ALB for this Ingress.
+#     Alternative (newer): use spec.ingressClassName: "alb" (set via ingressClassName below).
+#
+#   alb.ingress.kubernetes.io/scheme: "internal"
+#     ALB only reachable within the VPC. Never expose Schema Registry publicly.
+#
+#   alb.ingress.kubernetes.io/target-type: "ip"
+#     Route traffic directly to pod IPs (requires VPC CNI / aws-node).
+#     More efficient than "instance" (NodePort) target type.
+#
+#   alb.ingress.kubernetes.io/certificate-arn
+#     ACM certificate for HTTPS. The ALB presents this cert on port 443.
+#     Use a wildcard cert (*.internal.example.com) or a SAN cert.
+#
+#   alb.ingress.kubernetes.io/listen-ports
+#     Open both :80 (for redirect) and :443 (HTTPS).
+#
+#   alb.ingress.kubernetes.io/ssl-redirect: "443"
+#     ALB returns HTTP 301 for any request on :80, redirecting to :443.
+#
+#   alb.ingress.kubernetes.io/healthcheck-path: "/subjects"
+#     ALB health check path. Returns 401 when Basic auth is enabled —
+#     that is still a valid response indicating the process is alive.
+#     To suppress 401-as-unhealthy, set:
+#       alb.ingress.kubernetes.io/success-codes: "200,401"
+#
+#   alb.ingress.kubernetes.io/load-balancer-attributes
+#     idle_timeout: 60s is the ALB default; increase if you have long-running
+#     schema fetch operations (unlikely for SR REST API calls).
+#
+#   external-dns.alpha.kubernetes.io/hostname
+#     external-dns reads this annotation from the Ingress and creates / updates
+#     a Route 53 record. Replace with your actual hostname.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  ingressClassName: alb
+
+  annotations:
+    # ── AWS Load Balancer Controller ──────────────────────────────────────────
+    alb.ingress.kubernetes.io/scheme: "internal"
+    alb.ingress.kubernetes.io/target-type: "ip"
+
+    # ── TLS — ACM cert on :443, redirect :80 → :443 ──────────────────────────
+    # Replace the ARN with your ACM certificate for this hostname.
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+
+    # ── Health check ──────────────────────────────────────────────────────────
+    # 401 is expected when Basic auth is enabled — it means the process is up.
+    alb.ingress.kubernetes.io/healthcheck-path: "/subjects"
+    alb.ingress.kubernetes.io/healthcheck-protocol: "HTTP"
+    alb.ingress.kubernetes.io/healthcheck-port: "8081"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/success-codes: "200,401"
+
+    # ── ALB attributes ────────────────────────────────────────────────────────
+    alb.ingress.kubernetes.io/load-balancer-attributes: "idle_timeout.timeout_seconds=60,routing.http2.enabled=false"
+
+    # ── WAF (optional — remove if not using AWS WAF) ──────────────────────────
+    # alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/schema-registry-acl/xxxxxxxx"
+
+    # ── external-dns ──────────────────────────────────────────────────────────
+    # Replace with your actual hostname (must be in a Route 53 hosted zone
+    # that external-dns is configured to manage).
+    external-dns.alpha.kubernetes.io/hostname: "schema-registry.internal.example.com"
+    external-dns.alpha.kubernetes.io/ttl: "60"
+
+  hosts:
+    - host: schema-registry.internal.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+  # TLS block is not needed when ACM handles TLS at the ALB — leave empty.
+  tls: []

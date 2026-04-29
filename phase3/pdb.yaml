@@ -31,7 +31,6 @@ spec:
   minAvailable: 2
   selector:
     matchLabels:
-      # Bitnami chart labels (verified from helm template output).
       # Both labels are required — 'instance' distinguishes multiple releases.
       app.kubernetes.io/name: cp-schema-registry
       app.kubernetes.io/instance: schema-registry   # matches the helm release name
