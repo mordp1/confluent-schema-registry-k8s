@@ -1,0 +1,9 @@
+# Credentials — never commit real secrets
+phase2/.env
+*.env
+
+# Migration audit output
+phase2/migration-audit/
+
+# macOS
+.DS_Store

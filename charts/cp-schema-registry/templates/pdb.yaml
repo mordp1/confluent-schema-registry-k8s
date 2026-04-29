@@ -1,0 +1,18 @@
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cp-schema-registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cp-schema-registry.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cp-schema-registry.selectorLabels" . | nindent 6 }}
+{{- end }}

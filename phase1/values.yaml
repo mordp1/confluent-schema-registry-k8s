@@ -1,0 +1,120 @@
+# =============================================================================
+# Helm values — charts/cp-schema-registry (local chart)
+# Phase 1: Local kind-kafka-test cluster (namespace: kafka)
+#
+# Image:  confluentinc/cp-schema-registry:8.2.0  (official Community Edition)
+# Chart:  ./charts/cp-schema-registry  (local copy, no external repo needed)
+#
+# Kafka:  Strimzi cluster 'my-cluster', PLAINTEXT listener on :9092
+# Auth:   HTTP Basic via Jetty PropertyFileLoginModule (JAAS)
+# Service: ClusterIP only (access via kubectl port-forward for local testing)
+# =============================================================================
+
+replicaCount: 1
+
+image:
+  repository: confluentinc/cp-schema-registry
+  # Pin to a specific version — NEVER use 'latest'
+  tag: "8.2.0"
+  pullPolicy: IfNotPresent
+
+# Reduced heap for local/kind clusters — default 512M/512M is too large.
+heapOptions: "-Xms256M -Xmx256M"
+
+# ---------------------------------------------------------------------------
+# Kafka — Strimzi cluster 'my-cluster', PLAINTEXT listener on port 9092
+# ---------------------------------------------------------------------------
+kafka:
+  bootstrapServers: "PLAINTEXT://my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+
+servicePort: 8081
+
+service:
+  type: ClusterIP
+  port: 8081
+
+# ---------------------------------------------------------------------------
+# Schema Registry configuration overrides
+# Each key → SCHEMA_REGISTRY_<KEY_UPPERCASED_DOTS_TO_UNDERSCORES> env var.
+# ---------------------------------------------------------------------------
+configurationOverrides:
+  # Enable HTTP Basic authentication via the Jetty JAAS framework.
+  "authentication.method": "BASIC"
+  # Realm name must match the block name in jaas.conf (case-sensitive).
+  "authentication.realm": "SchemaRegistry-Props"
+  # Roles allowed to call the API — must exist in password.properties.
+  "authentication.roles": "write,read,admin"
+
+# ---------------------------------------------------------------------------
+# JAAS config path — injected as SCHEMA_REGISTRY_OPTS (JVM flag).
+# Points the Jetty JAAS subsystem to the mounted Secret file.
+#
+# schemaRegistryOpts sets SCHEMA_REGISTRY_OPTS, which the Confluent container
+# entrypoint (/etc/confluent/docker/run) appends to the JVM command line.
+# ---------------------------------------------------------------------------
+schemaRegistryOpts: "-Djava.security.auth.login.config=/etc/schema-registry/auth/jaas.conf"
+
+# ---------------------------------------------------------------------------
+# Mount the Kubernetes Secret that contains jaas.conf + password.properties.
+# See phase1/secret-auth.yaml for the Secret manifest.
+# ---------------------------------------------------------------------------
+volumes:
+  - name: auth-config
+    secret:
+      secretName: schema-registry-auth
+      defaultMode: 0400   # owner-read only
+
+volumeMounts:
+  - name: auth-config
+    mountPath: /etc/schema-registry/auth
+    readOnly: true
+
+# ---------------------------------------------------------------------------
+# Probes
+#
+# ⚠️  With BASIC auth enabled, GET /subjects → 401. Kubernetes treats 4xx as
+# failure and restarts the pod. Use type: "tcp" (port check only, auth-agnostic).
+# Switch to type: "http" only if you disable authentication.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  enabled: true
+  type: tcp
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  type: tcp
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# ---------------------------------------------------------------------------
+# Resources — minimal for kind
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# PDB — disabled for single-replica local testing
+# (a PDB on a 1-replica Deployment would block node drains)
+# ---------------------------------------------------------------------------
+pdb:
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# JMX / Prometheus — disabled for local testing
+# ---------------------------------------------------------------------------
+prometheus:
+  jmx:
+    enabled: false

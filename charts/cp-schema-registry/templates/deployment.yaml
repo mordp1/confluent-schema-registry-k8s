@@ -1,0 +1,184 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cp-schema-registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cp-schema-registry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cp-schema-registry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cp-schema-registry.labels" . | nindent 8 }}
+      {{- if or .Values.podAnnotations .Values.prometheus.jmx.enabled }}
+      annotations:
+        {{- range $key, $value := .Values.podAnnotations }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+        {{- if .Values.prometheus.jmx.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.prometheus.jmx.port | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cp-schema-registry.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # ── Schema Registry ────────────────────────────────────────────────
+        - name: {{ include "cp-schema-registry.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.servicePort }}
+              protocol: TCP
+            {{- if .Values.prometheus.jmx.enabled }}
+            - name: jmx
+              containerPort: {{ .Values.jmx.port }}
+              protocol: TCP
+            {{- end }}
+          # ── Liveness probe ──────────────────────────────────────────────
+          {{- if .Values.customLivenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.customLivenessProbe | nindent 12 }}
+          {{- else if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- if eq .Values.livenessProbe.type "http" }}
+            httpGet:
+              path: /subjects
+              port: {{ .Values.servicePort }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.servicePort }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds:       {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds:      {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold:    {{ .Values.livenessProbe.failureThreshold }}
+            successThreshold:    {{ .Values.livenessProbe.successThreshold }}
+          {{- end }}
+          # ── Readiness probe ─────────────────────────────────────────────
+          {{- if .Values.customReadinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.customReadinessProbe | nindent 12 }}
+          {{- else if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            {{- if eq .Values.readinessProbe.type "http" }}
+            httpGet:
+              path: /subjects
+              port: {{ .Values.servicePort }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.servicePort }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds:       {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds:      {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold:    {{ .Values.readinessProbe.failureThreshold }}
+            successThreshold:    {{ .Values.readinessProbe.successThreshold }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            # Pod IP used as the advertised host — required for leader election.
+            - name: SCHEMA_REGISTRY_HOST_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SCHEMA_REGISTRY_LISTENERS
+              value: "http://0.0.0.0:{{ .Values.servicePort }}"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+              value: {{ include "cp-schema-registry.kafka.bootstrapServers" . | quote }}
+            # Leader election group — scoped to the Helm release to avoid
+            # conflicts if multiple SR instances run in the same namespace.
+            - name: SCHEMA_REGISTRY_KAFKASTORE_GROUP_ID
+              value: {{ include "cp-schema-registry.fullname" . | quote }}
+            - name: SCHEMA_REGISTRY_MASTER_ELIGIBILITY
+              value: "true"
+            - name: SCHEMA_REGISTRY_HEAP_OPTS
+              value: {{ .Values.heapOptions | quote }}
+            # ── configurationOverrides ──────────────────────────────────
+            # Each key is uppercased and dots replaced with underscores,
+            # then prefixed with SCHEMA_REGISTRY_.
+            {{- range $key, $value := .Values.configurationOverrides }}
+            - name: {{ printf "SCHEMA_REGISTRY_%s" ($key | replace "." "_" | upper) | quote }}
+              value: {{ $value | quote }}
+            {{- end }}
+            # ── schemaRegistryOpts → SCHEMA_REGISTRY_OPTS ───────────────
+            {{- if .Values.schemaRegistryOpts }}
+            - name: SCHEMA_REGISTRY_OPTS
+              value: {{ .Values.schemaRegistryOpts | quote }}
+            {{- end }}
+            # ── JMX ─────────────────────────────────────────────────────
+            {{- if .Values.prometheus.jmx.enabled }}
+            - name: JMX_PORT
+              value: {{ .Values.jmx.port | quote }}
+            {{- end }}
+            # ── customEnv (list) ─────────────────────────────────────────
+            # Supports plain values and valueFrom (secretKeyRef, fieldRef, etc.)
+            {{- with .Values.customEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        # ── Prometheus JMX exporter sidecar ───────────────────────────────
+        {{- if .Values.prometheus.jmx.enabled }}
+        - name: prometheus-jmx-exporter
+          image: "{{ .Values.prometheus.jmx.image }}:{{ .Values.prometheus.jmx.imageTag }}"
+          imagePullPolicy: {{ .Values.prometheus.jmx.imagePullPolicy }}
+          command:
+            - java
+            - -jar
+            - jmx_prometheus_httpserver.jar
+            - {{ .Values.prometheus.jmx.port | quote }}
+            - /etc/jmx-schema-registry/jmx-schema-registry-prometheus.yml
+          ports:
+            - containerPort: {{ .Values.prometheus.jmx.port }}
+          {{- with .Values.prometheus.jmx.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: jmx-config
+              mountPath: /etc/jmx-schema-registry
+        {{- end }}
+      volumes:
+        {{- if .Values.prometheus.jmx.enabled }}
+        - name: jmx-config
+          configMap:
+            name: {{ include "cp-schema-registry.fullname" . }}-jmx-configmap
+        {{- end }}
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

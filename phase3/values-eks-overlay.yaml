@@ -1,0 +1,167 @@
+# =============================================================================
+# Helm values overlay — charts/cp-schema-registry (local chart)
+# Phase 3: EKS Production
+#
+# Apply ON TOP of phase1/values.yaml:
+#   helm upgrade schema-registry ./charts/cp-schema-registry \
+#     --kube-context <eks-context> \
+#     --namespace kafka \
+#     -f phase1/values.yaml \
+#     -f phase3/values-eks-overlay.yaml
+#
+# Only overrides what changes between local and production.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Multi-replica — Schema Registry is stateless at the HTTP API layer.
+# All schema state lives in the '_schemas' Kafka topic so horizontal
+# scaling is safe without coordination.
+# ---------------------------------------------------------------------------
+replicaCount: 3
+
+image:
+  repository: confluentinc/cp-schema-registry
+  tag: "7.7.1"
+  pullPolicy: IfNotPresent
+
+# Production JVM heap with G1GC tuning
+heapOptions: "-Xms512M -Xmx1G"
+
+# ---------------------------------------------------------------------------
+# Inherit auth configurationOverrides from phase1/values.yaml.
+# Add production-specific overrides below.
+# ---------------------------------------------------------------------------
+configurationOverrides:
+  "authentication.method": "BASIC"
+  "authentication.realm": "SchemaRegistry-Props"
+  "authentication.roles": "write,read,admin"
+  # '_schemas' topic replication factor — must match your Kafka ISR count.
+  # Default is 1; set to 3 for a 3-broker EKS/MSK cluster.
+  "kafkastore.topic.replication.factor": "3"
+
+schemaRegistryOpts: "-Djava.security.auth.login.config=/etc/schema-registry/auth/jaas.conf"
+
+# ---------------------------------------------------------------------------
+# Resources — production sizing baseline for ~500 req/s
+# Tune from Prometheus metrics after load testing.
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 500m
+    memory: 768Mi
+  limits:
+    cpu: "2"
+    memory: 1536Mi
+
+# ---------------------------------------------------------------------------
+# Service — internal AWS NLB
+# Schema Registry must NOT be publicly reachable.
+# ---------------------------------------------------------------------------
+service:
+  type: LoadBalancer
+  port: 8081
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+    service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: "preserve_client_ip.enabled=true"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "TCP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8081"
+
+# ---------------------------------------------------------------------------
+# Probes — exec probe with readonly credentials (more thorough than tcpSocket)
+# Reads the password at runtime from the mounted Secret file so no credential
+# is hardcoded in values.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  enabled: false   # overridden by customLivenessProbe below
+
+readinessProbe:
+  enabled: false   # overridden by customReadinessProbe below
+
+customLivenessProbe:
+  exec:
+    command:
+      - sh
+      - -c
+      - |
+        PASS=$(grep '^readonly:' /etc/schema-registry/auth/password.properties \
+               | cut -d: -f2 | cut -d, -f1 | tr -d ' ')
+        curl -sf -u "readonly:${PASS}" http://localhost:8081/subjects -o /dev/null
+  initialDelaySeconds: 45
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+customReadinessProbe:
+  exec:
+    command:
+      - sh
+      - -c
+      - |
+        PASS=$(grep '^readonly:' /etc/schema-registry/auth/password.properties \
+               | cut -d: -f2 | cut -d, -f1 | tr -d ' ')
+        curl -sf -u "readonly:${PASS}" http://localhost:8081/subjects -o /dev/null
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudget — at most 1 voluntary disruption with 3 replicas
+# ---------------------------------------------------------------------------
+pdb:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
+# ---------------------------------------------------------------------------
+# Pod anti-affinity — spread replicas across AZs
+# ---------------------------------------------------------------------------
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - cp-schema-registry
+          topologyKey: topology.kubernetes.io/zone
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics — enable in production
+# ---------------------------------------------------------------------------
+prometheus:
+  jmx:
+    enabled: true
+    image: solsson/kafka-prometheus-jmx-exporter
+    imageTag: "6f82e2b0464f50da8104acd7363fb9b995001ddff77d248379f8788e78946143"
+    imagePullPolicy: IfNotPresent
+    port: 5556
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# TLS CONSIDERATIONS
+#
+# Option A — TLS termination at the AWS NLB (recommended):
+#   Add to service.annotations:
+#     service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:..."
+#     service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+#   No changes to Schema Registry config required.
+#
+# Option B — TLS at Schema Registry (mTLS):
+#   Mount a JKS keystore Secret via volumes/volumeMounts, then add:
+#     configurationOverrides:
+#       "listeners": "https://0.0.0.0:8081"
+#       "ssl.keystore.location": "/etc/ssl/sr/keystore.jks"
+#       "ssl.keystore.password": "<password>"
+#       "ssl.key.password": "<password>"
+# ---------------------------------------------------------------------------

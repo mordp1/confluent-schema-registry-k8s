@@ -1,0 +1,26 @@
+Confluent Schema Registry {{ .Values.image.tag | default .Chart.AppVersion }} deployed.
+
+Release : {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Image   : {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+
+== Access ==
+Schema Registry is exposed as a {{ .Values.service.type }} service on port {{ .Values.service.port }}.
+
+Port-forward to test locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "cp-schema-registry.fullname" . }} 18081:{{ .Values.service.port }}
+
+Then run:
+  curl http://localhost:18081/subjects
+
+{{- if .Values.configurationOverrides }}
+
+== Auth ==
+{{- if index .Values.configurationOverrides "authentication.method" }}
+HTTP Basic authentication is ENABLED (realm: {{ index .Values.configurationOverrides "authentication.realm" | default "SchemaRegistry-Props" }}).
+Unauthenticated requests will receive HTTP 401.
+{{- end }}
+{{- end }}
+
+== Smoke tests ==
+  cd phase1 && ./smoke-test.sh

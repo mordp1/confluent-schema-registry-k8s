@@ -1,0 +1,189 @@
+# =============================================================================
+# Default values for cp-schema-registry
+# Official image: confluentinc/cp-schema-registry
+# =============================================================================
+
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# Image — pin to a specific tag; NEVER use 'latest'
+# CP 7.7.1 is the current stable Community Edition release.
+# ---------------------------------------------------------------------------
+image:
+  repository: confluentinc/cp-schema-registry
+  tag: "8.2.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ---------------------------------------------------------------------------
+# JVM heap settings — passed as SCHEMA_REGISTRY_HEAP_OPTS
+# Reduce for local/kind clusters; increase for production.
+# ---------------------------------------------------------------------------
+heapOptions: "-Xms512M -Xmx512M"
+
+# ---------------------------------------------------------------------------
+# Kafka connectivity
+# Protocol prefix is required: PLAINTEXT://, SASL_PLAINTEXT://, etc.
+# Example: "PLAINTEXT://my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+# ---------------------------------------------------------------------------
+kafka:
+  bootstrapServers: ""
+
+# ---------------------------------------------------------------------------
+# Schema Registry port
+# ---------------------------------------------------------------------------
+servicePort: 8081
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Schema Registry configuration overrides
+# Each key becomes SCHEMA_REGISTRY_<KEY_UPPERCASED> env var.
+# Dots in keys are replaced with underscores.
+# Example:
+#   configurationOverrides:
+#     "authentication.method": "BASIC"
+#     "authentication.realm": "SchemaRegistry-Props"
+# ---------------------------------------------------------------------------
+configurationOverrides: {}
+
+# ---------------------------------------------------------------------------
+# Extra JVM options → set as SCHEMA_REGISTRY_OPTS env var.
+# Use this to pass -Djava.security.auth.login.config and other JVM flags.
+# Example: "-Djava.security.auth.login.config=/etc/schema-registry/auth/jaas.conf"
+# ---------------------------------------------------------------------------
+schemaRegistryOpts: ""
+
+# ---------------------------------------------------------------------------
+# Extra environment variables — Kubernetes env var list format.
+# Supports both plain values and valueFrom (secretKeyRef, configMapKeyRef).
+# Example:
+#   customEnv:
+#     - name: JAVA_TOOL_OPTIONS
+#       value: "-Djava.security.auth.login.config=/etc/schema-registry/auth/jaas.conf"
+#     - name: MY_SECRET
+#       valueFrom:
+#         secretKeyRef:
+#           name: my-secret
+#           key: password
+# ---------------------------------------------------------------------------
+customEnv: []
+
+# ---------------------------------------------------------------------------
+# Extra volumes and volume mounts
+# Use these to mount Kubernetes Secrets, ConfigMaps, or emptyDirs.
+# Example (mounting a Secret for JAAS auth):
+#   volumes:
+#     - name: auth-config
+#       secret:
+#         secretName: schema-registry-auth
+#         defaultMode: 0400
+#   volumeMounts:
+#     - name: auth-config
+#       mountPath: /etc/schema-registry/auth
+#       readOnly: true
+# ---------------------------------------------------------------------------
+volumes: []
+volumeMounts: []
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+resources: {}
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Pod-level settings
+# ---------------------------------------------------------------------------
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+
+securityContext:
+  runAsUser: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Liveness probe
+# type: "tcp"  → tcpSocket probe on servicePort (auth-agnostic — recommended
+#                when HTTP Basic auth is enabled, as /subjects returns 401)
+# type: "http" → httpGet on /subjects (only use when auth is disabled)
+# type: "exec" → uses customLivenessProbe (set probe.enabled: false and
+#                populate customLivenessProbe instead)
+# ---------------------------------------------------------------------------
+livenessProbe:
+  enabled: true
+  type: tcp     # tcp | http — see note above
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  type: tcp
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Set customLivenessProbe / customReadinessProbe for full control.
+# When set, they override the probe built from livenessProbe/readinessProbe above.
+customLivenessProbe: {}
+customReadinessProbe: {}
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudget
+# Recommended for production (replicaCount >= 2).
+# ---------------------------------------------------------------------------
+pdb:
+  enabled: false
+  minAvailable: ""
+  maxUnavailable: 1
+
+# ---------------------------------------------------------------------------
+# JMX
+# ---------------------------------------------------------------------------
+jmx:
+  port: 5555
+
+# ---------------------------------------------------------------------------
+# Prometheus JMX exporter sidecar
+# ---------------------------------------------------------------------------
+prometheus:
+  jmx:
+    enabled: false
+    image: solsson/kafka-prometheus-jmx-exporter
+    imageTag: "latest"
+    imagePullPolicy: IfNotPresent
+    port: 5556
+    resources: {}
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}

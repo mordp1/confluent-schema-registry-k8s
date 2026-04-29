@@ -1,0 +1,37 @@
+# =============================================================================
+# PodDisruptionBudget — Schema Registry
+# Namespace: kafka
+#
+# Guarantees that at least 2 of 3 replicas stay available during:
+#   • kubectl drain (node maintenance / recycling)
+#   • Cluster version upgrades (EKS managed node group rollouts)
+#   • Spot instance reclamation (if using spot nodes)
+#   • Voluntary evictions from cluster-autoscaler scale-down
+#
+# With minAvailable=2 and replicaCount=3:
+#   • Only 1 pod can be voluntarily disrupted at a time
+#   • Involuntary disruptions (node crash, AZ outage) are NOT bounded by PDB
+#     → handled by multi-AZ anti-affinity in values-eks-overlay.yaml
+#
+# Apply before scaling to 3 replicas:
+#   kubectl --context <eks-context> apply -f phase3/pdb.yaml
+# =============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: schema-registry-pdb
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: cp-schema-registry
+    app.kubernetes.io/component: schema-registry
+spec:
+  # minAvailable = 2 means at most 1 disruption is allowed at any time.
+  # Alternative: maxUnavailable: 1 — functionally equivalent but minAvailable
+  # is preferred when the absolute floor (not fraction) matters for SLOs.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      # Bitnami chart labels (verified from helm template output).
+      # Both labels are required — 'instance' distinguishes multiple releases.
+      app.kubernetes.io/name: cp-schema-registry
+      app.kubernetes.io/instance: schema-registry   # matches the helm release name
