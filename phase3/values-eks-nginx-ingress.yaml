@@ -1,0 +1,170 @@
+# =============================================================================
+# EKS Exposure — Internal NGINX Ingress Controller + MSK SASL/SCRAM-SHA-512
+#
+# Designed for clusters where an internal NGINX ingress controller already
+# exists and is fronted by an internal AWS NLB:
+#
+#   Clients (VPC)
+#       │ HTTPS :443
+#       ▼
+#   AWS NLB (internal)                   ← pre-existing, class: nginx-int
+#       │ TCP passthrough
+#       ▼
+#   NGINX Ingress Controller pods        ← terminate TLS, route by hostname
+#       │ HTTP :8081
+#       ▼
+#   Schema Registry pods (ClusterIP)
+#
+# Full overlay stack:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace kafka \
+#     -f phase1/values.yaml \
+#     -f phase3/values-eks-overlay.yaml \
+#     -f phase3/values-eks-msk-sasl.yaml \
+#     -f phase3/values-eks-nginx-ingress.yaml
+#
+# Prerequisites:
+#   1. Internal NGINX ingress controller installed with IngressClass "nginx-int"
+#   2. MSK SASL Secret present:
+#        kubectl apply -f phase3/secret-msk-sasl.yaml -n kafka
+#      or via ESO: kubectl apply -f phase3/externalsecret-msk-sasl.yaml -n kafka
+#   3. TLS Secret in namespace kafka (see TLS options below)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Kafka — MSK SASL_SSL endpoint (eu-west-3, port 9096)
+#
+# Get your MSK bootstrap string:
+#   aws kafka get-bootstrap-brokers \
+#     --cluster-arn arn:aws:kafka:eu-west-3:ACCOUNT:cluster/NAME/... \
+#     --region eu-west-3 \
+#     --query 'BootstrapBrokerStringSaslScram' --output text
+# ---------------------------------------------------------------------------
+kafka:
+  bootstrapServers: >-
+    SASL_SSL://b-1.my-msk-cluster.xxxxx.kafka.eu-west-3.amazonaws.com:9096,b-2.my-msk-cluster.xxxxx.kafka.eu-west-3.amazonaws.com:9096,b-3.my-msk-cluster.xxxxx.kafka.eu-west-3.amazonaws.com:9096
+
+# ---------------------------------------------------------------------------
+# MSK SASL/SCRAM-SHA-512 configuration
+# ---------------------------------------------------------------------------
+configurationOverrides:
+  "kafkastore.security.protocol": "SASL_SSL"
+  "kafkastore.sasl.mechanism": "SCRAM-SHA-512"
+  "kafkastore.ssl.endpoint.identification.algorithm": "https"
+  "kafkastore.topic.replication.factor": "3"
+  "kafkastore.topic.min.insync.replicas": "2"
+  "authentication.method": "BASIC"
+  "authentication.realm": "SchemaRegistry-Props"
+  "authentication.roles": "write,read,admin"
+
+# SASL JAAS config — injected from Secret to avoid Helm quote-escaping issues
+customEnv:
+  - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+    valueFrom:
+      secretKeyRef:
+        name: schema-registry-msk-sasl
+        key: sasl-jaas-config
+
+# ---------------------------------------------------------------------------
+# Service — ClusterIP only; NGINX ingress routes directly to pod IPs
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Ingress — internal NGINX ingress controller
+#
+# NGINX annotation reference for Schema Registry:
+#
+#   proxy-body-size: "10m"
+#     Maximum size of a single request body. Avro/Protobuf schemas can be
+#     several KB; Protobuf schemas with imports can be larger. 10 MB is safe.
+#     Default NGINX limit is 1m which may cause 413 on large schema registrations.
+#
+#   proxy-read-timeout / proxy-send-timeout: "60"
+#     SR REST calls are fast (<100ms), but compatibility checks on large subject
+#     histories can take longer. 60s is conservative.
+#
+#   proxy-buffering: "off"
+#     Disable response buffering. SR responses are small JSON; buffering adds
+#     latency without benefit and can mask connection issues.
+#
+#   proxy-http-version: "1.1"
+#     Use HTTP/1.1 upstream (keep-alive). Reduces connection overhead when many
+#     producers/consumers hit the SR simultaneously.
+#
+#   configuration-snippet
+#     Ensure the Authorization header is forwarded to SR pods even when NGINX
+#     is configured to strip it (some NGINX builds do this by default for
+#     security hardening; explicit pass-through is safer).
+#
+# TLS OPTIONS — choose one:
+#
+#   Option A (recommended): cert-manager with your internal CA or ACM PCA
+#     Add annotation:  cert-manager.io/cluster-issuer: "your-cluster-issuer"
+#     cert-manager will create and renew the Secret automatically.
+#
+#   Option B: Pre-existing wildcard TLS Secret
+#     If you already have a wildcard cert for *.staging-apps-01-int.company.com,
+#     copy it to the kafka namespace:
+#       kubectl create secret tls schema-registry-tls \
+#         --cert=tls.crt --key=tls.key -n kafka
+#     Or sync it with reflector / kubed from the ingress-nginx namespace.
+#
+#   Option C: TLS terminated at the NLB (passthrough through NGINX)
+#     If your NLB already terminates TLS and sends plain HTTP to NGINX,
+#     remove the tls block and set nginx.ingress.kubernetes.io/ssl-redirect: "false"
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  ingressClassName: nginx-int
+
+  annotations:
+    # ── NGINX proxy settings ──────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+
+    # ── Pass Authorization header to Schema Registry ──────────────────────────
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Authorization $http_authorization;
+      proxy_pass_header  Authorization;
+
+    # ── TLS: force HTTPS ──────────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # ── CORS (optional — uncomment if browser-based tooling accesses SR) ──────
+    # nginx.ingress.kubernetes.io/enable-cors: "true"
+    # nginx.ingress.kubernetes.io/cors-allow-origin: "https://schema-registry-ui.staging-apps-01-int.company.com"
+    # nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, DELETE, OPTIONS"
+    # nginx.ingress.kubernetes.io/cors-allow-headers: "Authorization, Content-Type"
+
+    # ── cert-manager (Option A — remove if using a pre-existing Secret) ───────
+    # cert-manager.io/cluster-issuer: "your-cluster-issuer"
+
+  hosts:
+    # Replace with the actual hostname for your environment.
+    # Pattern matches your existing ingress: <service>.staging-apps-01-int.company.com
+    - host: schema-registry.staging-apps-01-int.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+  tls:
+    # Option A: cert-manager creates and manages this Secret automatically.
+    # Option B: create the Secret manually from your wildcard cert (see above).
+    - secretName: schema-registry-tls
+      hosts:
+        - schema-registry.staging-apps-01-int.company.com
+
+    # ── Wildcard alternative ─────────────────────────────────────────────────
+    # If you have a wildcard cert Secret already in the kafka namespace, use:
+    # - secretName: staging-apps-01-int-wildcard-tls
+    #   hosts:
+    #     - schema-registry.staging-apps-01-int.company.com
