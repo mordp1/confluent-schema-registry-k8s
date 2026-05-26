@@ -1,0 +1,61 @@
+# =============================================================================
+# Helm values overlay — AWS Network Load Balancer (NLB) via Service
+#
+# Prerequisites:
+#   - AWS Load Balancer Controller (github.com/kubernetes-sigs/aws-load-balancer-controller)
+#   - external-dns configured for Route 53 (github.com/kubernetes-sigs/external-dns)
+#   - ACM certificate covering your hostname
+#
+# What this does:
+#   - Creates an internal NLB (Layer 4)
+#   - TLS terminated at the NLB with an ACM certificate (HTTPS → HTTP to pods)
+#   - external-dns creates a Route 53 A-alias record automatically
+#   - Targets pod IPs directly (nlb-target-type: ip)
+#
+# When to choose NLB over ALB:
+#   - Want a dedicated endpoint per service (no shared ALB listeners)
+#   - Schema Registry serves plain HTTP/1.1 — NLB works fine at Layer 4
+#   - Future PrivateLink / VPC endpoint support needed
+#   - Simpler: no Ingress resource, just a Service
+#
+# Deploy:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace schema-registry --create-namespace \
+#     -f deploy/values-local.yaml \
+#     -f deploy/values-production.yaml \
+#     -f deploy/values-msk-sasl.yaml \
+#     -f deploy/ingress-nlb.yaml
+#
+# After deploy, check the NLB hostname:
+#   kubectl get svc schema-registry -n schema-registry \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+# =============================================================================
+
+service:
+  type: LoadBalancer
+  port: 8081
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+
+    # Replace with your ACM certificate ARN
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+
+    # TCP health check on port 8081 (works with or without Basic auth)
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "TCP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "8081"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "10"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-healthy-threshold: "2"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-unhealthy-threshold: "2"
+
+    service.beta.kubernetes.io/aws-load-balancer-attributes: "load_balancing.cross_zone.enabled=true"
+
+    # Replace with your actual hostname
+    external-dns.alpha.kubernetes.io/hostname: "schema-registry.internal.example.com"
+    external-dns.alpha.kubernetes.io/ttl: "60"
+
+ingress:
+  enabled: false

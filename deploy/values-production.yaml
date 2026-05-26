@@ -1,0 +1,125 @@
+# =============================================================================
+# Helm values — EKS Production overlay
+# Chart: ./charts/cp-schema-registry
+#
+# Apply ON TOP of values-local.yaml:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace schema-registry --create-namespace \
+#     -f deploy/values-local.yaml \
+#     -f deploy/values-production.yaml \
+#     -f deploy/values-msk-sasl.yaml     # add Kafka connectivity
+#     -f deploy/ingress-nginx.yaml       # add your exposure strategy
+#
+# Only overrides what changes between local and production.
+# =============================================================================
+
+replicaCount: 3
+
+image:
+  repository: confluentinc/cp-schema-registry
+  tag: "8.2.0"
+  pullPolicy: IfNotPresent
+
+# Production JVM heap
+heapOptions: "-Xms512M -Xmx1G"
+
+configurationOverrides:
+  "authentication.method": "BASIC"
+  "authentication.realm": "SchemaRegistry-Props"
+  "authentication.roles": "write,read,admin"
+  # _schemas topic replication factor — must match your Kafka ISR count
+  "kafkastore.topic.replication.factor": "3"
+
+schemaRegistryOpts: "-Djava.security.auth.login.config=/etc/schema-registry/auth/jaas.conf"
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 768Mi
+  limits:
+    cpu: "2"
+    memory: 1536Mi
+
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Probes — tcpSocket: auth-agnostic, works when Basic auth is enabled.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  enabled: false
+
+readinessProbe:
+  enabled: false
+
+customLivenessProbe:
+  tcpSocket:
+    port: 8081
+  initialDelaySeconds: 45
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+customReadinessProbe:
+  tcpSocket:
+    port: 8081
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudget — at most 1 voluntary disruption with 3 replicas
+# ---------------------------------------------------------------------------
+pdb:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
+# ---------------------------------------------------------------------------
+# Pod anti-affinity — spread replicas across AZs
+# ---------------------------------------------------------------------------
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - cp-schema-registry
+          topologyKey: topology.kubernetes.io/zone
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+
+securityContext:
+  runAsUser: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Prometheus JMX exporter sidecar
+# ---------------------------------------------------------------------------
+prometheus:
+  jmx:
+    enabled: true
+    image: bitnami/jmx-exporter
+    imageTag: "latest"
+    imagePullPolicy: IfNotPresent
+    port: 5556
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi

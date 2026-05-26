@@ -1,0 +1,31 @@
+# =============================================================================
+# PodDisruptionBudget — Schema Registry
+#
+# Guarantees at least 2 of 3 replicas stay available during:
+#   - kubectl drain (node maintenance / recycling)
+#   - EKS managed node group rollouts
+#   - Spot instance reclamation
+#   - Cluster-autoscaler scale-down
+#
+# With minAvailable=2 and replicaCount=3:
+#   - Only 1 pod can be voluntarily disrupted at a time
+#   - Involuntary disruptions (node crash, AZ outage) are NOT bounded by PDB
+#     → handled by multi-AZ anti-affinity in values-production.yaml
+#
+# Apply before scaling to 3 replicas:
+#   kubectl apply -f deploy/pdb.yaml -n schema-registry
+# =============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: schema-registry-pdb
+  namespace: schema-registry   # change to match your deployment namespace
+  labels:
+    app.kubernetes.io/name: cp-schema-registry
+    app.kubernetes.io/component: schema-registry
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cp-schema-registry
+      app.kubernetes.io/instance: schema-registry   # matches the Helm release name

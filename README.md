@@ -1,13 +1,8 @@
-# Confluent Schema Registry on Kubernetes
+# cp-schema-registry — Confluent Cloud to Self-Hosted Migration
 
-A production-ready, self-contained example for running **Confluent Schema Registry Community Edition** on Kubernetes — from a local kind cluster all the way to EKS.
+A self-contained toolkit for running **Confluent Schema Registry Community Edition** on Kubernetes and migrating schemas from **Confluent Cloud**.
 
-Includes:
-- A local Helm chart using the official `confluentinc/cp-schema-registry` image (no Bitnami)
-- HTTP Basic authentication with Jetty JAAS
-- Schema migration scripts (file-based and live pull from Confluent Cloud)
-- Smoke tests and migration validation
-- EKS production overlay
+Includes a local Helm chart, migration scripts (live pull and file-based), smoke tests, and production-ready examples for EKS with MSK.
 
 > Tested with Confluent Platform **8.2.0** (Jetty 12) and **7.7.1** (Jetty 9) on kind and EKS.
 
@@ -20,32 +15,29 @@ Includes:
 ├── charts/
 │   └── cp-schema-registry/        # Local Helm chart (official confluentinc image)
 │       ├── Chart.yaml
-│       ├── values.yaml             # All knobs documented
+│       ├── values.yaml             # Chart defaults (all options documented)
 │       └── templates/
-│           ├── deployment.yaml
-│           ├── service.yaml
-│           ├── serviceaccount.yaml
-│           ├── pdb.yaml
-│           ├── jmx-configmap.yaml
-│           ├── _helpers.tpl
-│           └── NOTES.txt
 │
-├── phase1/                         # Local kind cluster deployment
-│   ├── values.yaml                 # Helm overrides (Strimzi Kafka, Basic auth, TCP probes)
-│   ├── secret-auth.yaml            # Kubernetes Secret: jaas.conf + password.properties
-│   └── smoke-test.sh               # 6 automated auth + schema registration tests
+├── deploy/                         # Helm values overlays + Kubernetes manifests
+│   ├── values-local.yaml           # Local testing (kind / minikube + Strimzi)
+│   ├── values-production.yaml      # EKS production (3 replicas, PDB, anti-affinity)
+│   ├── values-msk-sasl.yaml        # Amazon MSK SASL/SCRAM-SHA-512 connectivity
+│   ├── ingress-nginx.yaml          # NGINX Ingress Controller example
+│   ├── ingress-alb.yaml            # AWS ALB Ingress example
+│   ├── ingress-nlb.yaml            # AWS NLB via Service example
+│   ├── secret-auth.yaml            # HTTP Basic Auth secret template
+│   ├── secret-msk-sasl.yaml        # MSK SASL credentials secret template
+│   ├── externalsecret-msk-sasl.yaml # Same via External Secrets Operator
+│   └── pdb.yaml                    # Standalone PodDisruptionBudget
 │
-├── phase2/                         # Schema migration from Confluent Cloud
-│   ├── migrate-from-cloud.sh       # Strategy B: live pull via Confluent Cloud REST API
+├── migration/                      # Schema migration scripts
+│   ├── migrate-from-cloud.sh       # Strategy B: live pull from Confluent Cloud REST API
 │   ├── import-schemas.sh           # Strategy A: import from local .json export files
-│   ├── validate-migration.sh       # Validation: compare Cloud vs local schemas
-│   ├── .env                        # Credentials (gitignored — never committed)
-│   └── .env.example                # Template for .env
+│   ├── validate-migration.sh       # Compare Cloud vs local schemas
+│   ├── delete-migrated.sh          # Clean up local SR for re-migration
+│   └── .env.example                # Credentials template
 │
-├── phase3/                         # EKS production notes
-│   ├── values-eks-overlay.yaml     # 3 replicas, NLB, anti-affinity, Prometheus JMX
-│   └── pdb.yaml                    # PodDisruptionBudget (minAvailable: 2)
-│
+├── smoke-test.sh                   # 6 automated auth + schema registration tests
 └── .gitignore
 ```
 
@@ -53,110 +45,137 @@ Includes:
 
 ## Why a local chart?
 
-The official `confluentinc/cp-helm-charts` repository only publishes an **umbrella chart** via Helm repo — individual sub-charts like `cp-schema-registry` are not installable standalone. This repo extracts and extends the sub-chart with:
+The official `confluentinc/cp-helm-charts` repository only publishes an umbrella chart — individual sub-charts like `cp-schema-registry` are not installable standalone. This chart extends the original with:
 
-- `volumes` / `volumeMounts` support (needed for JAAS Secret mount)
-- Configurable probe type (`tcp` | `http`) — critical when Basic auth is enabled
-- `schemaRegistryOpts` to set `SCHEMA_REGISTRY_OPTS` env var (for JVM flags)
+- `volumes` / `volumeMounts` support (required for JAAS Secret mount)
+- `customLivenessProbe` / `customReadinessProbe` (tcpSocket by default — safe with Basic auth)
+- `schemaRegistryOpts` to set `SCHEMA_REGISTRY_OPTS` (JVM flags)
 - `customEnv` as a proper list (supports `valueFrom` / `secretKeyRef`)
+- `fullnameOverride` to control resource naming
 - PodDisruptionBudget, SecurityContext, ServiceAccount templates
 
 ---
 
-## Resource naming
+## Prerequisites
 
-Helm release `schema-registry` + chart `cp-schema-registry`:
-
-| Resource | Name |
-|---|---|
-| Deployment | `schema-registry-cp-schema-registry` |
-| Service | `schema-registry-cp-schema-registry` |
-| Pod label | `app.kubernetes.io/name=cp-schema-registry` |
-| ServiceAccount | `schema-registry-cp-schema-registry` |
+```bash
+brew install kubectl helm jq curl
+```
 
 ---
 
-## Phase 1 — Deploy to kind
-
-### Prerequisites
-
-```bash
-# Tools
-brew install kind kubectl helm jq
-
-# A kind cluster with Strimzi Kafka already running in namespace 'kafka'
-# Strimzi cluster name: my-cluster, PLAINTEXT listener on port 9092
-```
+## Deploy — Local (kind / minikube)
 
 ### 1. Create the auth Secret
 
-Edit `phase1/secret-auth.yaml` — replace `changeme-admin-password` and `changeme-readonly-password` with strong passwords generated via `openssl rand -base64 32`, then apply:
+Edit `deploy/secret-auth.yaml` — replace the placeholder passwords with values generated via `openssl rand -base64 32`, then apply:
 
 ```bash
-kubectl apply -f phase1/secret-auth.yaml -n kafka
+kubectl apply -f deploy/secret-auth.yaml -n schema-registry
 ```
 
 ### 2. Deploy Schema Registry
 
 ```bash
 helm upgrade --install schema-registry ./charts/cp-schema-registry \
-  --namespace kafka \
-  --create-namespace \
-  -f phase1/values.yaml
+  --namespace schema-registry --create-namespace \
+  -f deploy/values-local.yaml
 ```
 
 ### 3. Watch rollout
 
 ```bash
-kubectl rollout status deployment/schema-registry-cp-schema-registry -n kafka
+kubectl rollout status deployment/schema-registry -n schema-registry
 ```
 
 ### 4. Port-forward and test
 
 ```bash
-kubectl port-forward svc/schema-registry-cp-schema-registry -n kafka 18081:8081 &
-
+kubectl port-forward svc/schema-registry -n schema-registry 18081:8081 &
 curl -u admin:changeme-admin-password http://localhost:18081/subjects | jq
 ```
 
 ### 5. Run smoke tests
 
 ```bash
-chmod +x phase1/smoke-test.sh
-./phase1/smoke-test.sh
+./smoke-test.sh
+# Override defaults if needed:
+NAMESPACE=schema-registry ADMIN_PASS=your-password ./smoke-test.sh
 ```
 
 ---
 
-## Phase 2 — Migrate schemas from Confluent Cloud
+## Deploy — EKS Production
+
+### Prerequisites
+
+- AWS Load Balancer Controller or existing internal NGINX ingress controller
+- Amazon MSK cluster with SASL/SCRAM enabled
+- (Optional) cert-manager or a wildcard TLS Secret
+
+### 1. Create secrets
+
+```bash
+# HTTP Basic Auth
+kubectl apply -f deploy/secret-auth.yaml -n schema-registry
+
+# MSK SASL credentials (manual — or use externalsecret-msk-sasl.yaml for ESO)
+kubectl apply -f deploy/secret-msk-sasl.yaml -n schema-registry
+```
+
+> Edit the secrets and replace placeholder values with real credentials before applying.
+
+### 2. Choose an exposure strategy
+
+| File | When to use |
+|---|---|
+| `deploy/ingress-nginx.yaml` | Internal NGINX ingress controller already exists |
+| `deploy/ingress-alb.yaml` | AWS ALB Ingress Controller — shared ALB, WAF, path routing |
+| `deploy/ingress-nlb.yaml` | Dedicated NLB per service, PrivateLink future support |
+
+### 3. Deploy
+
+```bash
+helm upgrade --install schema-registry ./charts/cp-schema-registry \
+  --namespace schema-registry --create-namespace \
+  -f deploy/values-local.yaml \
+  -f deploy/values-production.yaml \
+  -f deploy/values-msk-sasl.yaml \
+  -f deploy/ingress-nginx.yaml    # or ingress-alb.yaml / ingress-nlb.yaml
+```
+
+---
+
+## Migrate schemas from Confluent Cloud
 
 ### Setup credentials
 
 ```bash
-cp phase2/.env.example phase2/.env
-# Edit phase2/.env with your Confluent Cloud SR URL, API key/secret, and local SR password
-source phase2/.env
+cp migration/.env.example migration/.env
+# Edit migration/.env with your Confluent Cloud SR URL, API key/secret, and local SR password
+source migration/.env
 ```
 
 ### Strategy A — File-based import
 
-Use this when you have exported `.json` files from Confluent Cloud (via `confluent schema-registry export` or similar):
+Use this when you have exported `.json` files from Confluent Cloud:
 
 ```bash
-./phase2/import-schemas.sh \
+./migration/import-schemas.sh \
   --dir ./schemas \
   --sr-url "${LOCAL_SR_URL}" \
   --user   "${LOCAL_SR_USER}" \
-  --password "${LOCAL_SR_PASS}"
+  --password "${LOCAL_SR_PASS}" \
+  --import-mode
 ```
 
 Dry-run first to validate files without POSTing:
 
 ```bash
-./phase2/import-schemas.sh --dir ./schemas --dry-run
+./migration/import-schemas.sh --dir ./schemas --dry-run
 ```
 
-Expected input file format (one `.json` per subject or per version):
+Expected input format (one `.json` per subject or per version):
 
 ```json
 {
@@ -171,90 +190,78 @@ Expected input file format (one `.json` per subject or per version):
 
 ### Strategy B — Live pull from Confluent Cloud
 
-Connects directly to the Confluent Cloud Schema Registry REST API and mirrors subjects into your local SR:
+Connects directly to the Confluent Cloud Schema Registry REST API and mirrors subjects to your local SR:
 
 ```bash
-./phase2/migrate-from-cloud.sh \
-  --local-sr-url   "${LOCAL_SR_URL}" \
-  --local-user     "${LOCAL_SR_USER}" \
-  --local-password "${LOCAL_SR_PASS}"
-```
-
-Useful flags:
-
-| Flag | Description |
-|---|---|
-| `--dry-run` | List subjects that would be migrated, without POSTing |
-| `--all-versions` | Migrate all schema versions (default: latest only) |
-| `--subject-filter "^orders-"` | Only migrate subjects matching this regex |
-| `--import-mode` | Set local SR to IMPORT mode to preserve original Confluent Cloud schema IDs |
-| `--save-dir ./audit` | Save each fetched schema as a `.json` file for audit trail |
-| `--continue-on-error` | Skip failures instead of aborting on first error |
-
-**Preserving schema IDs** (recommended when producers/consumers reference schemas by numeric ID):
-
-```bash
-./phase2/migrate-from-cloud.sh \
+./migration/migrate-from-cloud.sh \
   --local-sr-url   "${LOCAL_SR_URL}" \
   --local-user     "${LOCAL_SR_USER}" \
   --local-password "${LOCAL_SR_PASS}" \
   --import-mode
 ```
 
-> Note: `--import-mode` requires a clean (empty) local SR, or IDs must not conflict with any already registered locally.
+| Flag | Description |
+|---|---|
+| `--dry-run` | List subjects that would be migrated, without POSTing |
+| `--all-versions` | Migrate all schema versions (default: latest only) |
+| `--subject-filter "^orders-"` | Only migrate subjects matching this regex |
+| `--import-mode` | Preserve original Confluent Cloud schema IDs |
+| `--save-dir ./audit` | Save each fetched schema as a `.json` file |
+| `--continue-on-error` | Skip failures instead of aborting |
+
+> **`--import-mode` is recommended** when producers/consumers reference schemas by numeric ID. Without it, new IDs are assigned and existing serialized messages may fail to deserialize.
+>
+> `--import-mode` requires a **clean (empty) local SR** or IDs must not conflict with any already registered locally. If re-migrating, run `delete-migrated.sh --permanent` first (see below).
 
 ### Validate the migration
 
 ```bash
-source phase2/.env
-./phase2/validate-migration.sh
+source migration/.env
+./migration/validate-migration.sh
 ```
 
-For each subject the script checks:
+Per subject the script checks:
 1. Subject exists in local SR
 2. Schema content matches Confluent Cloud (canonical JSON comparison)
 3. `schemaType` matches (AVRO / JSON / PROTOBUF)
-4. Schema ID preserved (warns if IDs differ — expected when run without `--import-mode`)
-5. Backward compatibility check against local SR
+4. Schema ID preserved (warns if IDs differ — expected without `--import-mode`)
+5. Backward compatibility check
 6. Round-trip POST returns 200 (idempotency)
 
 Filter to a subset:
 
 ```bash
-./phase2/validate-migration.sh --filter "^orders-"
-./phase2/validate-migration.sh --subject "orders-value"
-./phase2/validate-migration.sh --no-color   # CI-friendly output
+./migration/validate-migration.sh --filter "^orders-"
+./migration/validate-migration.sh --subject "orders-value"
+./migration/validate-migration.sh --no-color   # CI-friendly
 ```
 
----
+### Re-migrate (clean slate)
 
-## Phase 3 — EKS production
-
-Apply the production overlay on top of `phase1/values.yaml`:
+If you need to redo the migration with correct settings:
 
 ```bash
-helm upgrade --install schema-registry ./charts/cp-schema-registry \
-  --namespace kafka \
-  -f phase1/values.yaml \
-  -f phase3/values-eks-overlay.yaml
-```
+# 1. Dry run — see what would be deleted
+./migration/delete-migrated.sh \
+  --local-sr-url "${LOCAL_SR_URL}" \
+  --local-user   "${LOCAL_SR_USER}" \
+  --local-password "${LOCAL_SR_PASS}" \
+  --dry-run
 
-What the overlay enables:
+# 2. Hard delete — frees the original IDs so --import-mode works correctly
+./migration/delete-migrated.sh \
+  --local-sr-url "${LOCAL_SR_URL}" \
+  --local-user   "${LOCAL_SR_USER}" \
+  --local-password "${LOCAL_SR_PASS}" \
+  --permanent
 
-| Setting | Value |
-|---|---|
-| Replicas | 3 |
-| Service type | `LoadBalancer` (AWS NLB, internal) |
-| PDB | `minAvailable: 2` |
-| JVM | G1GC, 1 GB heap |
-| Liveness probe | `exec` (reads password from mounted Secret — auth-safe) |
-| Pod anti-affinity | Zone-spread (`topology.kubernetes.io/zone`) |
-| Prometheus JMX exporter | Enabled on port 5556 |
-
-Apply the standalone PodDisruptionBudget:
-
-```bash
-kubectl apply -f phase3/pdb.yaml -n kafka
+# 3. Re-migrate
+./migration/migrate-from-cloud.sh \
+  --local-sr-url   "${LOCAL_SR_URL}" \
+  --local-user     "${LOCAL_SR_USER}" \
+  --local-password "${LOCAL_SR_PASS}" \
+  --all-versions \
+  --import-mode
 ```
 
 ---
@@ -263,75 +270,55 @@ kubectl apply -f phase3/pdb.yaml -n kafka
 
 ### CP 8.x — Jetty 12 JAAS class renamed
 
-Confluent Platform 8.x upgraded from Jetty 9 to Jetty 12. The JAAS `PropertyFileLoginModule` moved to a new package:
+Confluent Platform 8.x upgraded from Jetty 9 to Jetty 12. The JAAS `PropertyFileLoginModule` moved packages:
 
 | CP version | Class |
 |---|---|
-| CP 7.x and earlier (Jetty 9) | `org.eclipse.jetty.jaas.spi.PropertyFileLoginModule` |
-| CP 8.x and later (Jetty 12) | `org.eclipse.jetty.security.jaas.spi.PropertyFileLoginModule` |
+| CP ≤ 7.x (Jetty 9) | `org.eclipse.jetty.jaas.spi.PropertyFileLoginModule` |
+| CP ≥ 8.x (Jetty 12) | `org.eclipse.jetty.security.jaas.spi.PropertyFileLoginModule` |
 
-Using the old class with CP 8.x causes **silent 401 on every authenticated request** — the pod starts healthy but all credentials are rejected. The `secret-auth.yaml` in this repo uses the correct class for CP 8.x.
-
-To verify which class your version uses:
-
-```bash
-POD=$(kubectl get pod -n kafka -l app.kubernetes.io/name=cp-schema-registry -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n kafka "$POD" -- python3 -c "
-import zipfile
-jar = '/usr/share/java/confluent-security/schema-registry/jetty-security-12.0.25.jar'
-with zipfile.ZipFile(jar) as z:
-    for n in z.namelist():
-        if 'PropertyFile' in n: print(n)
-"
-```
+Using the old class with CP 8.x causes **silent 401 on every authenticated request** — the pod starts healthy but all credentials are rejected. `deploy/secret-auth.yaml` uses the correct class for CP 8.x.
 
 ### HTTP Basic auth + Kubernetes probes → restart loop
 
-When `authentication.method: BASIC` is enabled, `GET /subjects` returns `401`. Kubernetes treats 4xx as a probe failure and restarts the pod endlessly.
+When `authentication.method: BASIC` is enabled, `GET /subjects` returns `401`. Kubernetes treats 4xx as probe failure and restarts the pod.
 
-**Fix:** use `livenessProbe.type: tcp` (port reachability check — auth-agnostic). The chart and `phase1/values.yaml` default to `type: tcp`. Only switch to `type: http` when authentication is disabled.
-
-### `helm install` fails on existing release
-
-```
-Error: INSTALLATION FAILED: cannot re-use a name that is still in use
-```
-
-Use `helm upgrade --install` — it installs on first run and upgrades on subsequent runs. All commands in this guide already use this form.
-
-### Port-forward drops after pod restart
-
-After `helm upgrade` or `kubectl rollout restart`, the port-forward loses its connection. Restart it:
+**Fix:** use `tcpSocket` probes (port reachability check — auth-agnostic). All values files in this repo already use tcpSocket. To patch an existing deployment:
 
 ```bash
-kubectl port-forward svc/schema-registry-cp-schema-registry -n kafka 18081:8081 &
+./smoke-test.sh --patch-probes
 ```
 
-### Subject names with spaces
+### NGINX ingress — configuration-snippet blocked
 
-Confluent Cloud allows subject names containing spaces (e.g. `"My Topic"`). The migration and validation scripts URL-encode subject names via `python3 urllib.parse.quote`. If python3 is unavailable, a `sed`-based fallback handles spaces and a few common special characters.
+In ingress-nginx ≥ 1.9 (post CVE-2025-1974), `configuration-snippet` annotations are disabled by default. If you see:
 
----
+```
+admission webhook denied: annotation group ConfigurationSnippet contains risky annotation
+```
 
-## Security notes
+Either remove the `configuration-snippet` block from `deploy/ingress-nginx.yaml` (Authorization headers are forwarded by default in most setups), or enable snippets in the controller:
 
-- **Never commit `phase2/.env`** — it is in `.gitignore`. Copy from `.env.example` and fill in locally.
-- Passwords in `secret-auth.yaml` are placeholders. Replace them before any real deployment.
-- Generate strong passwords: `openssl rand -base64 32`
-- For production, store credentials in AWS Secrets Manager, HashiCorp Vault, or Azure Key Vault and inject via the external-secrets operator or Vault agent injector.
-- The Secret `defaultMode: 0400` ensures password files are owner-read-only inside the pod.
+```bash
+kubectl patch configmap ingress-nginx-controller -n ingress-nginx \
+  --patch '{"data":{"allow-snippet-annotations":"true"}}'
+```
+
+### --import-mode assigns new IDs if `id` field is missing from payload
+
+The migration scripts now include `id` and `version` in the POST payload when `--import-mode` is active. If you used an older version of the script without this fix, re-migrate using `delete-migrated.sh --permanent` first.
 
 ---
 
 ## Quick reference
 
 ```bash
-# Deploy
+# Deploy (local)
 helm upgrade --install schema-registry ./charts/cp-schema-registry \
-  -n kafka -f phase1/values.yaml
+  -n schema-registry --create-namespace -f deploy/values-local.yaml
 
 # Port-forward
-kubectl port-forward svc/schema-registry-cp-schema-registry -n kafka 18081:8081 &
+kubectl port-forward svc/schema-registry -n schema-registry 18081:8081 &
 
 # List subjects
 curl -u admin:changeme-admin-password http://localhost:18081/subjects | jq
@@ -340,24 +327,32 @@ curl -u admin:changeme-admin-password http://localhost:18081/subjects | jq
 curl -u admin:changeme-admin-password \
   -X POST http://localhost:18081/subjects/orders-value/versions \
   -H "Content-Type: application/vnd.schemaregistry.v1+json" \
-  -d '{
-    "schemaType": "AVRO",
-    "schema": "{\"type\":\"record\",\"name\":\"Order\",\"namespace\":\"io.example\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"},{\"name\":\"amount\",\"type\":\"double\"}]}"
-  }'
-
-# Migrate from Confluent Cloud
-source phase2/.env
-./phase2/migrate-from-cloud.sh \
-  --local-sr-url "${LOCAL_SR_URL}" \
-  --local-user   "${LOCAL_SR_USER}" \
-  --local-password "${LOCAL_SR_PASS}"
-
-# Validate migration
-./phase2/validate-migration.sh
+  -d '{"schemaType":"AVRO","schema":"{\"type\":\"record\",\"name\":\"Order\",\"namespace\":\"io.example\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"},{\"name\":\"amount\",\"type\":\"double\"}]}"}'
 
 # Smoke tests
-./phase1/smoke-test.sh
+./smoke-test.sh
+
+# Migrate from Confluent Cloud
+source migration/.env
+./migration/migrate-from-cloud.sh \
+  --local-sr-url "${LOCAL_SR_URL}" \
+  --local-user   "${LOCAL_SR_USER}" \
+  --local-password "${LOCAL_SR_PASS}" \
+  --import-mode
+
+# Validate migration
+./migration/validate-migration.sh
 
 # Watch pod logs
-kubectl logs -n kafka -l app.kubernetes.io/name=cp-schema-registry -f
+kubectl logs -n schema-registry -l app.kubernetes.io/name=cp-schema-registry -f
 ```
+
+---
+
+## Security notes
+
+- **Never commit `migration/.env`** — it is in `.gitignore`. Copy from `.env.example` and fill in locally.
+- Passwords in `deploy/secret-auth.yaml` are placeholders. Replace before any real deployment.
+- Generate strong passwords: `openssl rand -base64 32`
+- For production, store credentials in AWS Secrets Manager, HashiCorp Vault, or Azure Key Vault and inject via the External Secrets Operator (`deploy/externalsecret-msk-sasl.yaml`).
+- The Secret `defaultMode: 0400` ensures password files are owner-read-only inside the pod.

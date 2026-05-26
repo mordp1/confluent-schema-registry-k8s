@@ -1,0 +1,77 @@
+# =============================================================================
+# Helm values overlay — NGINX Ingress Controller
+#
+# Architecture:
+#   Clients (VPC)
+#       │ HTTPS :443
+#       ▼
+#   AWS NLB (internal)                   ← pre-existing, IngressClass: nginx-int
+#       │ TCP passthrough
+#       ▼
+#   NGINX Ingress Controller pods        ← terminate TLS, route by hostname
+#       │ HTTP :8081
+#       ▼
+#   Schema Registry pods (ClusterIP)
+#
+# Deploy:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace schema-registry --create-namespace \
+#     -f deploy/values-local.yaml \
+#     -f deploy/values-production.yaml \
+#     -f deploy/values-msk-sasl.yaml \
+#     -f deploy/ingress-nginx.yaml
+#
+# ⚠ configuration-snippet note:
+#   The annotation below uses nginx.ingress.kubernetes.io/configuration-snippet
+#   which is blocked by default in ingress-nginx >= 1.9 when
+#   allow-snippet-annotations: false (the default after CVE-2025-1974).
+#
+#   To enable it, patch the ingress-nginx controller ConfigMap:
+#     kubectl patch configmap ingress-nginx-controller -n ingress-nginx \
+#       --patch '{"data":{"allow-snippet-annotations":"true"}}'
+#
+#   Alternatively, remove the configuration-snippet block — Authorization headers
+#   are typically forwarded by NGINX by default unless explicitly stripped.
+# =============================================================================
+
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+ingress:
+  enabled: true
+  ingressClassName: nginx-int   # change to match your IngressClass
+
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # Forward Authorization header to Schema Registry pods.
+    # Requires allow-snippet-annotations: true in the ingress-nginx controller.
+    # Remove this block if your NGINX version restricts configuration-snippet.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Authorization $http_authorization;
+      proxy_pass_header  Authorization;
+
+    # cert-manager (uncomment and set your cluster issuer):
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+  hosts:
+    - host: schema-registry.internal.example.com   # replace with your hostname
+      paths:
+        - path: /
+          pathType: Prefix
+
+  tls:
+    # Option A: cert-manager creates and manages this Secret automatically.
+    # Option B: create manually — kubectl create secret tls schema-registry-tls --cert=tls.crt --key=tls.key
+    - secretName: schema-registry-tls
+      hosts:
+        - schema-registry.internal.example.com   # replace with your hostname

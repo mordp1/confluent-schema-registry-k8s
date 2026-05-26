@@ -1,0 +1,99 @@
+# =============================================================================
+# Helm values — Local deployment (kind / minikube)
+# Chart: ./charts/cp-schema-registry
+#
+# Kafka: Strimzi cluster 'my-cluster', PLAINTEXT listener on port 9092
+# Auth:  HTTP Basic via Jetty PropertyFileLoginModule (JAAS)
+# Service: ClusterIP — access via kubectl port-forward
+# =============================================================================
+
+replicaCount: 1
+
+image:
+  repository: confluentinc/cp-schema-registry
+  # Pin to a specific version — never use 'latest'
+  tag: "8.2.0"
+  pullPolicy: IfNotPresent
+
+# Reduced heap for local clusters
+heapOptions: "-Xms256M -Xmx256M"
+
+kafka:
+  # Strimzi cluster, PLAINTEXT listener on port 9092
+  bootstrapServers: "PLAINTEXT://my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+
+servicePort: 8081
+
+service:
+  type: ClusterIP
+  port: 8081
+
+# ---------------------------------------------------------------------------
+# Schema Registry configuration overrides
+# Each key → SCHEMA_REGISTRY_<KEY_UPPERCASED_DOTS_TO_UNDERSCORES> env var.
+# ---------------------------------------------------------------------------
+configurationOverrides:
+  "authentication.method": "BASIC"
+  # Realm name must match the block name in jaas.conf (case-sensitive).
+  "authentication.realm": "SchemaRegistry-Props"
+  "authentication.roles": "write,read,admin"
+
+# Points the Jetty JAAS subsystem to the mounted Secret file.
+schemaRegistryOpts: "-Djava.security.auth.login.config=/etc/schema-registry/auth/jaas.conf"
+
+# Mount the Kubernetes Secret containing jaas.conf + password.properties.
+# See deploy/secret-auth.yaml for the Secret manifest.
+volumes:
+  - name: auth-config
+    secret:
+      secretName: schema-registry-auth
+      defaultMode: 0400
+
+volumeMounts:
+  - name: auth-config
+    mountPath: /etc/schema-registry/auth
+    readOnly: true
+
+# ---------------------------------------------------------------------------
+# Probes
+#
+# With BASIC auth enabled, GET /subjects returns 401. Kubernetes treats 4xx
+# as a probe failure and restarts the pod. Use tcpSocket (port check only,
+# auth-agnostic). Switch to httpGet only when auth is disabled.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  enabled: false
+
+readinessProbe:
+  enabled: false
+
+customLivenessProbe:
+  tcpSocket:
+    port: 8081
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+customReadinessProbe:
+  tcpSocket:
+    port: 8081
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+pdb:
+  enabled: false
+
+prometheus:
+  jmx:
+    enabled: false

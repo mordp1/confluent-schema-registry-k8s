@@ -1,35 +1,41 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Schema Registry smoke tests — Phase 1 (kind-kafka-test cluster)
+# Schema Registry smoke tests
 #
-# Runs a port-forward to the Schema Registry pod and executes 5 tests:
+# Runs a port-forward to the Schema Registry pod and executes 6 tests:
 #   1. Unauthenticated GET /subjects  → expect 401 (auth is enforced)
 #   2. Authenticated  GET /subjects   → expect 200
 #   3. Register an Avro schema        → expect 200 with schema ID
 #   4. Read back the registered schema
-#   5. Write attempt with read-only user → expect 403
+#   5. Write attempt with read-only user → expect 401 or 403
+#   6. GET /config → check global compatibility level
 #
 # Usage:
-#   chmod +x smoke-test.sh
-#   ./smoke-test.sh                      # run full smoke tests
-#   ./smoke-test.sh --patch-probes       # fix liveness probe restart loop first
+#   ./smoke-test.sh
+#   ./smoke-test.sh --patch-probes     # fix liveness probe restart loop first
+#
+# Environment variables (override defaults):
+#   NAMESPACE     Kubernetes namespace (default: schema-registry)
+#   CONTEXT       kubectl context (default: current context)
+#   LOCAL_PORT    Local port for port-forward (default: 18081)
+#   ADMIN_PASS    Admin password (default: changeme-admin-password)
+#   READONLY_PASS Read-only password (default: changeme-readonly-password)
 #
 # Prerequisites:
 #   - kubectl, curl, jq installed
-#   - kind-kafka-test context active and schema-registry deployed
+#   - Schema Registry deployed and pods running
 # =============================================================================
 set -euo pipefail
 
-NAMESPACE="kafka"
-CONTEXT="kind-kafka-test"
-LOCAL_PORT="18081"      # local port to forward to (avoids conflicts with :8081)
+NAMESPACE="${NAMESPACE:-schema-registry}"
+CONTEXT="${CONTEXT:-}"
+LOCAL_PORT="${LOCAL_PORT:-18081}"
 SR_URL="http://localhost:${LOCAL_PORT}"
 
-# Must match password.properties in secret-auth.yaml
 ADMIN_USER="admin"
-ADMIN_PASS="changeme-admin-password"
+ADMIN_PASS="${ADMIN_PASS:-changeme-admin-password}"
 READONLY_USER="readonly"
-READONLY_PASS="changeme-readonly-password"
+READONLY_PASS="${READONLY_PASS:-changeme-readonly-password}"
 
 PASS=0; FAIL=0
 PF_PID=""
@@ -39,13 +45,18 @@ hr()   { printf '\n%s\n' "──────────────────
 ok()   { printf '  ✓  %s\n' "$1"; (( PASS++ )) || true; }
 fail() { printf '  ✗  %s\n' "$1"; (( FAIL++ )) || true; }
 
-kube() { kubectl --context="${CONTEXT}" -n "${NAMESPACE}" "$@"; }
+kube() {
+  if [[ -n "${CONTEXT}" ]]; then
+    kubectl --context="${CONTEXT}" -n "${NAMESPACE}" "$@"
+  else
+    kubectl -n "${NAMESPACE}" "$@"
+  fi
+}
 
 # ── Patch probes ──────────────────────────────────────────────────────────────
 # Run this ONCE after initial helm install to stop the liveness/readiness probe
 # restart loop caused by HTTP 401 on /subjects when auth is enabled.
-# (If you used values.yaml from this repo, tcpSocket probes are already set and
-#  this patch is not needed — it's included as a fallback for manual installs.)
+# (If you used values-local.yaml from this repo, tcpSocket probes are already set.)
 patch_probes() {
   hr
   echo "Patching deployment probes → tcpSocket (workaround for 401 on /subjects)"
@@ -54,7 +65,7 @@ patch_probes() {
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
   if [[ -z "${deploy}" ]]; then
-    echo "  No schema-registry deployment found. Is it deployed?"
+    echo "  No schema-registry deployment found in namespace '${NAMESPACE}'."
     exit 1
   fi
 
@@ -95,13 +106,13 @@ start_port_forward() {
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
   if [[ -z "${pod}" ]]; then
-    echo "ERROR: no running cp-schema-registry pod found. Check: kubectl -n ${NAMESPACE} get pods"
+    echo "ERROR: no running cp-schema-registry pod found in namespace '${NAMESPACE}'."
+    echo "Check: kubectl -n ${NAMESPACE} get pods"
     exit 1
   fi
 
   kube port-forward "pod/${pod}" "${LOCAL_PORT}:8081" &>/tmp/sr-pf.log &
   PF_PID=$!
-  # Give it a moment to establish
   sleep 2
   if ! kill -0 "${PF_PID}" 2>/dev/null; then
     echo "ERROR: port-forward failed. Check /tmp/sr-pf.log"
@@ -117,29 +128,23 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Test helpers ──────────────────────────────────────────────────────────────
-http_code() {
-  curl -s -o /dev/null -w "%{http_code}" "$@"
-}
+http_code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
 
-sr_get() {
+sr_get()  {
   curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" \
-    -H "Accept: application/vnd.schemaregistry.v1+json" \
-    "$@"
+    -H "Accept: application/vnd.schemaregistry.v1+json" "$@"
 }
 
 sr_post() {
   curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" \
-    -X POST \
-    -H "Content-Type: application/vnd.schemaregistry.v1+json" \
-    "$@"
+    -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" "$@"
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 test_unauth_401() {
   hr
   echo "TEST 1 — Unauthenticated GET /subjects → expect 401"
-  local code
-  code=$(http_code "${SR_URL}/subjects")
+  local code; code=$(http_code "${SR_URL}/subjects")
   if [[ "${code}" == "401" ]]; then
     ok "Got 401 — authentication is enforced"
   else
@@ -150,10 +155,9 @@ test_unauth_401() {
 test_auth_200() {
   hr
   echo "TEST 2 — Authenticated GET /subjects → expect 200"
-  local body code
-  code=$(http_code -u "${ADMIN_USER}:${ADMIN_PASS}" "${SR_URL}/subjects")
+  local code; code=$(http_code -u "${ADMIN_USER}:${ADMIN_PASS}" "${SR_URL}/subjects")
   if [[ "${code}" == "200" ]]; then
-    body=$(sr_get "${SR_URL}/subjects")
+    local body; body=$(sr_get "${SR_URL}/subjects")
     ok "Got 200 — current subjects: ${body}"
   else
     fail "Expected 200, got ${code}"
@@ -163,21 +167,15 @@ test_auth_200() {
 test_register_schema() {
   hr
   echo "TEST 3 — Register Avro schema for subject 'smoke-test-value'"
-
-  # An Avro record schema with a few representative field types.
-  # The 'schema' field must be a JSON-escaped string (not a nested object).
   local payload='{
     "schemaType": "AVRO",
-    "schema": "{\"type\":\"record\",\"name\":\"SmokeTestEvent\",\"namespace\":\"io.example.schemaregistry\",\"doc\":\"Smoke-test schema for Schema Registry validation\",\"fields\":[{\"name\":\"id\",\"type\":\"string\",\"doc\":\"Unique event identifier\"},{\"name\":\"eventType\",\"type\":\"string\"},{\"name\":\"timestamp\",\"type\":\"long\",\"logicalType\":\"timestamp-millis\"},{\"name\":\"payload\",\"type\":[\"null\",\"string\"],\"default\":null}]}"
+    "schema": "{\"type\":\"record\",\"name\":\"SmokeTestEvent\",\"namespace\":\"io.example\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"},{\"name\":\"eventType\",\"type\":\"string\"},{\"name\":\"timestamp\",\"type\":\"long\"},{\"name\":\"payload\",\"type\":[\"null\",\"string\"],\"default\":null}]}"
   }'
-
   local response schema_id
   response=$(sr_post -d "${payload}" "${SR_URL}/subjects/smoke-test-value/versions")
   schema_id=$(echo "${response}" | jq -r '.id // empty')
-
   if [[ -n "${schema_id}" ]]; then
     ok "Schema registered — id=${schema_id}"
-    # Store for next test
     export REGISTERED_SCHEMA_ID="${schema_id}"
   else
     fail "Registration failed — response: ${response}"
@@ -192,7 +190,6 @@ test_read_back_schema() {
   subject=$(echo "${response}" | jq -r '.subject // empty')
   version=$(echo "${response}" | jq -r '.version // empty')
   id=$(echo "${response}" | jq -r '.id // empty')
-
   if [[ "${subject}" == "smoke-test-value" && -n "${id}" ]]; then
     ok "Schema retrieved — subject=${subject} version=${version} id=${id}"
   else
@@ -206,11 +203,9 @@ test_readonly_cannot_write() {
   local code
   code=$(curl -s -o /dev/null -w "%{http_code}" \
     -u "${READONLY_USER}:${READONLY_PASS}" \
-    -X POST \
-    -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+    -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
     -d '{"schemaType":"AVRO","schema":"{\"type\":\"string\"}"}' \
     "${SR_URL}/subjects/unauthorized-write-attempt/versions")
-
   if [[ "${code}" == "401" || "${code}" == "403" ]]; then
     ok "Got ${code} — read-only user write blocked"
   else
@@ -233,7 +228,9 @@ test_global_config() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
   echo "================================================================"
-  echo "  Schema Registry Smoke Tests — kind-kafka-test / namespace:kafka"
+  echo "  Schema Registry Smoke Tests"
+  echo "  Namespace : ${NAMESPACE}"
+  echo "  Context   : ${CONTEXT:-<current>}"
   echo "================================================================"
 
   if [[ "${1:-}" == "--patch-probes" ]]; then
@@ -243,7 +240,7 @@ main() {
     exit 0
   fi
 
-  command -v jq  >/dev/null 2>&1 || { echo "ERROR: jq is required (brew install jq)"; exit 1; }
+  command -v jq   >/dev/null 2>&1 || { echo "ERROR: jq is required (brew install jq)"; exit 1; }
   command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required"; exit 1; }
 
   start_port_forward
@@ -265,9 +262,11 @@ main() {
   else
     echo "  All smoke tests passed ✓"
     echo ""
-    echo "  Next steps:"
-    echo "    • Run schema migration: cd ../phase2 && ./import-schemas.sh --help"
-    echo "    • Access Kafka UI: kubectl port-forward svc/kafka-ui 8080:8080 -n kafka"
+    echo "  Next step — migrate schemas from Confluent Cloud:"
+    echo "    cp migration/.env.example migration/.env"
+    echo "    source migration/.env"
+    echo "    ./migration/migrate-from-cloud.sh --local-sr-url http://localhost:18081 \\"
+    echo "      --local-user admin --local-password \"\${LOCAL_SR_PASS}\" --import-mode"
     exit 0
   fi
 }

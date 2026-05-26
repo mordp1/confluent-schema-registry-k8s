@@ -12,14 +12,14 @@
 # as a representative end-to-end subject test.
 #
 # Usage:
-#   source phase2/.env          # load credentials
-#   ./phase2/validate-migration.sh
+#   source migration/.env          # load credentials
+#   ./migration/validate-migration.sh
 #
 #   # Validate only subjects matching a pattern
-#   ./phase2/validate-migration.sh --filter "orders"
+#   ./migration/validate-migration.sh --filter "orders"
 #
 #   # Check a single subject
-#   ./phase2/validate-migration.sh --subject "orders-value"
+#   ./migration/validate-migration.sh --subject "orders-value"
 #
 # Options:
 #   --filter REGEX    Only validate subjects matching this pattern (grep -E)
@@ -288,9 +288,9 @@ print_summary() {
   if [[ "${FAIL}" -gt 0 ]]; then
     printf "${RED}VALIDATION FAILED${RESET} — check output above\n\n"
     echo "Hints:"
-    echo "  • Run the migration:  source phase2/.env && ./phase2/migrate-from-cloud.sh --local-password \"\${LOCAL_SR_PASS}\" --local-sr-url \"\${LOCAL_SR_URL}\""
+    echo "  • Run the migration:  source migration/.env && ./phase2/migrate-from-cloud.sh --local-password \"\${LOCAL_SR_PASS}\" --local-sr-url \"\${LOCAL_SR_URL}\""
     echo "  • Preserve IDs:       add --import-mode to the command above"
-    echo "  • Port-forward:       kubectl -n kafka port-forward svc/schema-registry-cp-schema-registry 18081:8081"
+    echo "  • Port-forward:       kubectl -n kafka port-forward svc/schema-registry 18081:8081"
     return 1
   else
     printf "${GREEN}ALL VALIDATIONS PASSED${RESET}\n\n"
@@ -310,7 +310,7 @@ main() {
     pass "Local SR reachable at ${LOCAL_SR_URL}"
   else
     fail "Cannot reach local SR at ${LOCAL_SR_URL}"
-    echo "  Start port-forward:  kubectl -n kafka port-forward svc/schema-registry-cp-schema-registry 18081:8081 &"
+    echo "  Start port-forward:  kubectl -n kafka port-forward svc/schema-registry 18081:8081 &"
     exit 1
   fi
 

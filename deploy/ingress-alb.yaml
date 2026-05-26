@@ -1,0 +1,71 @@
+# =============================================================================
+# Helm values overlay — AWS Application Load Balancer (ALB) Ingress
+#
+# Prerequisites:
+#   - AWS Load Balancer Controller (github.com/kubernetes-sigs/aws-load-balancer-controller)
+#   - external-dns configured for Route 53 (github.com/kubernetes-sigs/external-dns)
+#   - ACM certificate covering your hostname
+#
+# What this does:
+#   - Creates an internal ALB (Layer 7)
+#   - HTTPS :443 with ACM cert; HTTP :80 redirects to HTTPS
+#   - ALB routes directly to pod IPs (target-type: ip)
+#   - external-dns creates a Route 53 CNAME/ALIAS record automatically
+#
+# When to choose ALB over NLB:
+#   - Share one ALB across multiple services (cost saving)
+#   - Need host-based or path-based routing
+#   - Need HTTP → HTTPS redirect at the load balancer
+#   - Need AWS WAF integration (WAF only attaches to ALB)
+#
+# Deploy:
+#   helm upgrade --install schema-registry ./charts/cp-schema-registry \
+#     --namespace schema-registry --create-namespace \
+#     -f deploy/values-local.yaml \
+#     -f deploy/values-production.yaml \
+#     -f deploy/values-msk-sasl.yaml \
+#     -f deploy/ingress-alb.yaml
+# =============================================================================
+
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+ingress:
+  enabled: true
+  ingressClassName: alb
+
+  annotations:
+    alb.ingress.kubernetes.io/scheme: "internal"
+    alb.ingress.kubernetes.io/target-type: "ip"
+
+    # Replace with your ACM certificate ARN
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+
+    # 401 is expected when Basic auth is enabled — it means the process is up
+    alb.ingress.kubernetes.io/healthcheck-path: "/subjects"
+    alb.ingress.kubernetes.io/healthcheck-protocol: "HTTP"
+    alb.ingress.kubernetes.io/healthcheck-port: "8081"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/success-codes: "200,401"
+
+    alb.ingress.kubernetes.io/load-balancer-attributes: "idle_timeout.timeout_seconds=60,routing.http2.enabled=false"
+
+    # Replace with your actual hostname (must be in a Route 53 hosted zone
+    # that external-dns is configured to manage)
+    external-dns.alpha.kubernetes.io/hostname: "schema-registry.internal.example.com"
+    external-dns.alpha.kubernetes.io/ttl: "60"
+
+  hosts:
+    - host: schema-registry.internal.example.com   # replace with your hostname
+      paths:
+        - path: /
+          pathType: Prefix
+
+  # TLS block is not needed when ACM handles TLS at the ALB
+  tls: []

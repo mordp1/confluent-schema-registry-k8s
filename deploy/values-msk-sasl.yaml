@@ -1,0 +1,72 @@
+# =============================================================================
+# Helm values overlay — Amazon MSK SASL/SCRAM-SHA-512 connectivity
+#
+# Configures Schema Registry to connect to Amazon MSK using:
+#   security.protocol = SASL_SSL  (TLS transport + SASL authentication)
+#   sasl.mechanism    = SCRAM-SHA-512
+#
+# MSK SCRAM broker endpoint: port 9096
+# MSK IAM broker endpoint:   port 9098 (different mechanism — see notes below)
+#
+# Prerequisites:
+#   1. MSK cluster with SASL/SCRAM enabled
+#   2. SCRAM user created and associated with the MSK cluster
+#   3. Kubernetes Secret "schema-registry-msk-sasl" present:
+#        kubectl apply -f deploy/secret-msk-sasl.yaml -n schema-registry
+#      Or via External Secrets Operator:
+#        kubectl apply -f deploy/externalsecret-msk-sasl.yaml -n schema-registry
+#   4. Security group on MSK brokers allows inbound TCP 9096 from EKS node SG
+#
+# Find your MSK bootstrap string:
+#   aws kafka get-bootstrap-brokers \
+#     --cluster-arn arn:aws:kafka:REGION:ACCOUNT:cluster/NAME/... \
+#     --query 'BootstrapBrokerStringSaslScram' --output text
+# =============================================================================
+
+kafka:
+  bootstrapServers: >-
+    SASL_SSL://b-1.your-msk-cluster.xxxxx.kafka.us-east-1.amazonaws.com:9096,b-2.your-msk-cluster.xxxxx.kafka.us-east-1.amazonaws.com:9096,b-3.your-msk-cluster.xxxxx.kafka.us-east-1.amazonaws.com:9096
+
+configurationOverrides:
+  "kafkastore.security.protocol": "SASL_SSL"
+  "kafkastore.sasl.mechanism": "SCRAM-SHA-512"
+  # MSK TLS is signed by Amazon Trust Services CA, which is included in
+  # Java's default truststore — no custom truststore needed.
+  "kafkastore.ssl.endpoint.identification.algorithm": "https"
+  "kafkastore.topic.replication.factor": "3"
+  "kafkastore.topic.min.insync.replicas": "2"
+  "authentication.method": "BASIC"
+  "authentication.realm": "SchemaRegistry-Props"
+  "authentication.roles": "write,read,admin"
+
+# ---------------------------------------------------------------------------
+# SASL JAAS config — injected from Secret to avoid Helm quote-escaping issues.
+# The JAAS string contains literal double-quotes; configurationOverrides would
+# escape them and break the JAAS parser. valueFrom: secretKeyRef bypasses it.
+# ---------------------------------------------------------------------------
+customEnv:
+  - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+    valueFrom:
+      secretKeyRef:
+        name: schema-registry-msk-sasl
+        key: sasl-jaas-config
+
+# ---------------------------------------------------------------------------
+# Notes
+# ---------------------------------------------------------------------------
+#
+# Verify MSK connectivity after deploy:
+#   POD=$(kubectl get pod -n schema-registry -l app.kubernetes.io/name=cp-schema-registry \
+#         -o jsonpath='{.items[0].metadata.name}')
+#   kubectl logs -n schema-registry "$POD" | grep -i "kafka\|bootstrap\|sasl\|leader"
+#
+# MSK IAM alternative (port 9098):
+#   kafka.bootstrapServers: "SASL_SSL://...:9098,..."
+#   configurationOverrides:
+#     "kafkastore.sasl.mechanism": "AWS_MSK_IAM"
+#   customEnv:
+#     - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+#       value: "software.amazon.msk.auth.iam.IAMLoginModule required;"
+#     - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_CLIENT_CALLBACK_HANDLER_CLASS
+#       value: software.amazon.msk.auth.iam.IAMClientCallbackHandler
+#   IRSA on the ServiceAccount must have msk:Connect permission.

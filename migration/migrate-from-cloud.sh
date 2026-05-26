@@ -158,10 +158,12 @@ migrate_version() {
   local version_json="$2"
   local version_num="${3:-?}"
 
-  local schema schema_type references payload
-  schema=$(echo "${version_json}"       | jq -r '.schema')
-  schema_type=$(echo "${version_json}"  | jq -r '.schemaType // "AVRO"')
-  references=$(echo "${version_json}"   | jq -c '.references // []')
+  local schema schema_type references schema_id schema_version payload
+  schema=$(echo "${version_json}"          | jq -r '.schema')
+  schema_type=$(echo "${version_json}"     | jq -r '.schemaType // "AVRO"')
+  references=$(echo "${version_json}"      | jq -c '.references // []')
+  schema_id=$(echo "${version_json}"       | jq -r '.id // empty')
+  schema_version=$(echo "${version_json}"  | jq -r '.version // empty')
 
   # ── Optionally save to disk ───────────────────────────────────────────────
   if [[ -n "${SAVE_DIR}" ]]; then
@@ -171,11 +173,23 @@ migrate_version() {
     echo "${version_json}" > "${SAVE_DIR}/${safe_subject}_v${version_num}.json"
   fi
 
-  payload=$(jq -n \
-    --arg   st   "${schema_type}" \
-    --arg   sc   "${schema}" \
-    --argjson refs "${references}" \
-    '{schemaType: $st, schema: $sc, references: $refs}')
+  # In IMPORT mode include id + version so the local SR preserves original IDs.
+  # Without these fields the SR assigns new IDs even when in IMPORT mode.
+  if [[ "${IMPORT_MODE}" == true && -n "${schema_id}" && -n "${schema_version}" ]]; then
+    payload=$(jq -n \
+      --arg    st  "${schema_type}" \
+      --arg    sc  "${schema}" \
+      --argjson refs "${references}" \
+      --argjson id  "${schema_id}" \
+      --argjson ver "${schema_version}" \
+      '{schemaType: $st, schema: $sc, references: $refs, id: $id, version: $ver}')
+  else
+    payload=$(jq -n \
+      --arg   st   "${schema_type}" \
+      --arg   sc   "${schema}" \
+      --argjson refs "${references}" \
+      '{schemaType: $st, schema: $sc, references: $refs}')
+  fi
 
   local encoded_subject
   encoded_subject=$(urlencode "${subject}")
