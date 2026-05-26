@@ -108,7 +108,7 @@ skip() { printf '  –  %s\n'   "$1"; (( SKIP++ )) || true; }
 
 set_mode() {
   local mode="$1"
-  [[ "${DRY_RUN}" == true ]] && return
+  if [[ "${DRY_RUN}" == true ]]; then return 0; fi
   log "Setting Schema Registry mode → ${mode}"
   local response code
   response=$(curl -s -w "\n%{http_code}" \
@@ -118,7 +118,9 @@ set_mode() {
     -d "{\"mode\":\"${mode}\"}" \
     "${SR_URL}/mode")
   code=$(echo "${response}" | tail -1)
-  [[ "${code}" != "200" ]] && log "  WARNING: failed to set mode (HTTP ${code}) — continuing"
+  if [[ "${code}" != "200" ]]; then
+    log "  WARNING: failed to set mode (HTTP ${code}) — continuing"
+  fi
 }
 
 # ── Process a single export file ──────────────────────────────────────────────
@@ -141,12 +143,14 @@ process_file() {
     return
   fi
 
-  local subject schema schema_type references
-  subject=$(jq -r '.subject'         "${filepath}")
-  schema=$(jq -r '.schema'           "${filepath}")
+  local subject schema schema_type references schema_id schema_version
+  subject=$(jq -r '.subject'              "${filepath}")
+  schema=$(jq -r '.schema'               "${filepath}")
   # Default to AVRO when schemaType is absent (matches Confluent Cloud export behaviour)
   schema_type=$(jq -r '.schemaType // "AVRO"' "${filepath}")
-  references=$(jq -c '.references // []'       "${filepath}")
+  references=$(jq -c '.references // []'  "${filepath}")
+  schema_id=$(jq -r '.id // empty'        "${filepath}")
+  schema_version=$(jq -r '.version // empty' "${filepath}")
 
   # ── Apply subject filters ─────────────────────────────────────────────────
   if [[ -n "${SPECIFIC_SUBJECT}" && "${subject}" != "${SPECIFIC_SUBJECT}" ]]; then
@@ -175,11 +179,21 @@ process_file() {
   # The 'schema' value is already a JSON-escaped string in Confluent exports.
   # Using jq --arg ensures correct re-escaping if the value came from a nested object.
   local payload
-  payload=$(jq -n \
-    --arg   st   "${schema_type}" \
-    --arg   sc   "${schema}" \
-    --argjson refs "${references}" \
-    '{schemaType: $st, schema: $sc, references: $refs}')
+  if [[ "${IMPORT_MODE}" == true && -n "${schema_id}" && -n "${schema_version}" ]]; then
+    payload=$(jq -n \
+      --arg    st  "${schema_type}" \
+      --arg    sc  "${schema}" \
+      --argjson refs "${references}" \
+      --argjson id  "${schema_id}" \
+      --argjson ver "${schema_version}" \
+      '{schemaType: $st, schema: $sc, references: $refs, id: $id, version: $ver}')
+  else
+    payload=$(jq -n \
+      --arg   st   "${schema_type}" \
+      --arg   sc   "${schema}" \
+      --argjson refs "${references}" \
+      '{schemaType: $st, schema: $sc, references: $refs}')
+  fi
 
   # ── POST to Schema Registry ───────────────────────────────────────────────
   local response http_code body

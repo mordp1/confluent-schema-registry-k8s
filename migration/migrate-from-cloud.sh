@@ -144,12 +144,14 @@ local_put() {
 # ── SR mode management ────────────────────────────────────────────────────────
 set_mode() {
   local mode="$1"
-  [[ "${DRY_RUN}" == true ]] && return
+  if [[ "${DRY_RUN}" == true ]]; then return 0; fi
   log "Setting local SR mode → ${mode}"
   local r
   r=$(local_put "/mode" "{\"mode\":\"${mode}\"}")
   local code; code=$(echo "${r}" | tail -1)
-  [[ "${code}" != "200" ]] && log "  WARNING: mode set returned HTTP ${code}"
+  if [[ "${code}" != "200" ]]; then
+    log "  WARNING: mode set returned HTTP ${code}"
+  fi
 }
 
 # ── Migrate a single (subject, version JSON) pair ────────────────────────────
@@ -202,10 +204,17 @@ migrate_version() {
     200)
       local id; id=$(echo "${body}" | jq -r '.id // "?"')
       ok "${subject}@v${version_num} (${schema_type}): id=${id}"
+      return 0
       ;;
     409)
       local id; id=$(echo "${body}" | jq -r '.id // "?"')
       ok "${subject}@v${version_num}: already registered → id=${id} (idempotent)"
+      return 0
+      ;;
+    422)
+      local msg; msg=$(echo "${body}" | jq -r '.message // .error_code // empty' 2>/dev/null || echo "${body}")
+      printf '  ⟳  %s@v%s: reference conflict — will retry (%s)\n' "${subject}" "${version_num}" "${msg}"
+      return 2
       ;;
     *)
       local msg; msg=$(echo "${body}" | jq -r '.message // .error_code // empty' 2>/dev/null || echo "${body}")
@@ -215,21 +224,24 @@ migrate_version() {
         set_mode "READWRITE"
         exit 1
       fi
+      return 3
       ;;
   esac
 }
 
 # ── Migrate all versions or latest for one subject ────────────────────────────
+# Returns 2 if any version had an HTTP 422 (reference conflict → caller retries)
 migrate_subject() {
   local subject="$1"
   local encoded
   encoded=$(urlencode "${subject}")
+  local subject_rc=0 rc
 
   if [[ "${ALL_VERSIONS}" == true ]]; then
     local versions_json
     if ! versions_json=$(cc_get "/subjects/${encoded}/versions" 2>/dev/null); then
       err "${subject}: failed to fetch version list from Confluent Cloud"
-      return
+      return 3
     fi
     local -a version_nums=()
     while IFS= read -r v; do version_nums+=("$v"); done \
@@ -241,17 +253,19 @@ migrate_subject() {
         err "${subject}@v${v}: fetch failed"
         continue
       fi
-      migrate_version "${subject}" "${vdata}" "${v}"
+      migrate_version "${subject}" "${vdata}" "${v}" && rc=$? || rc=$?
+      [[ "${rc}" -gt "${subject_rc}" ]] && subject_rc="${rc}" || true
     done
   else
     local vdata
     if ! vdata=$(cc_get "/subjects/${encoded}/versions/latest" 2>/dev/null); then
       err "${subject}: failed to fetch from Confluent Cloud (check subject name)"
-      return
+      return 3
     fi
     local vnum; vnum=$(echo "${vdata}" | jq -r '.version // "latest"')
-    migrate_version "${subject}" "${vdata}" "${vnum}"
+    migrate_version "${subject}" "${vdata}" "${vnum}" && subject_rc=$? || subject_rc=$?
   fi
+  return "${subject_rc}"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -303,10 +317,26 @@ main() {
   # ── Set IMPORT mode if requested ──────────────────────────────────────────
   [[ "${IMPORT_MODE}" == true ]] && set_mode "IMPORT"
 
-  # ── Migrate each subject ──────────────────────────────────────────────────
+  # ── First pass ───────────────────────────────────────────────────────────
+  local -a retry_subjects=()
+  local rc
   for subject in "${subjects[@]}"; do
-    migrate_subject "${subject}" || true   # never let a single subject abort the loop
+    migrate_subject "${subject}" && rc=$? || rc=$?
+    [[ "${rc}" -eq 2 ]] && retry_subjects+=("${subject}") || true
   done
+
+  # ── Retry pass: resolve reference ordering (422 → retry after dependents) ─
+  if [[ ${#retry_subjects[@]} -gt 0 ]]; then
+    log "Retrying ${#retry_subjects[@]} subject(s) with reference conflicts..."
+    for subject in "${retry_subjects[@]}"; do
+      migrate_subject "${subject}" && rc=$? || rc=$?
+      if [[ "${rc}" -eq 2 || "${rc}" -eq 3 ]]; then
+        err "${subject}: still failed after retry"
+        [[ "${CONTINUE_ON_ERROR}" == false ]] && \
+          { set_mode "READWRITE"; log "Aborting. Use --continue-on-error to skip errors."; exit 1; }
+      fi
+    done
+  fi
 
   # ── Restore READWRITE mode ────────────────────────────────────────────────
   [[ "${IMPORT_MODE}" == true ]] && set_mode "READWRITE"

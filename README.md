@@ -246,14 +246,16 @@ If you need to redo the migration with correct settings:
   --local-sr-url "${LOCAL_SR_URL}" \
   --local-user   "${LOCAL_SR_USER}" \
   --local-password "${LOCAL_SR_PASS}" \
-  --dry-run
+  --from-local --dry-run
 
-# 2. Hard delete — frees the original IDs so --import-mode works correctly
+# 2. Hard delete everything from local SR (--from-local is important: it also
+#    removes schemas not in CC, such as local reference schemas that would
+#    otherwise block deletion of the CC subjects they depend on)
 ./migration/delete-migrated.sh \
   --local-sr-url "${LOCAL_SR_URL}" \
   --local-user   "${LOCAL_SR_USER}" \
   --local-password "${LOCAL_SR_PASS}" \
-  --permanent
+  --from-local --permanent
 
 # 3. Re-migrate
 ./migration/migrate-from-cloud.sh \
@@ -263,6 +265,8 @@ If you need to redo the migration with correct settings:
   --all-versions \
   --import-mode
 ```
+
+> Both `delete-migrated.sh` and `migrate-from-cloud.sh` handle schema reference ordering automatically: subjects that fail with HTTP 422 (reference conflict) are queued and retried after their dependencies are resolved.
 
 ---
 
