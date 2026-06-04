@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "cp-schema-registry.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.hpa.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "cp-schema-registry.selectorLabels" . | nindent 6 }}

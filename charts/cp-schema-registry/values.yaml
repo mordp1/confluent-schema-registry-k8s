@@ -155,6 +155,39 @@ customLivenessProbe: {}
 customReadinessProbe: {}
 
 # ---------------------------------------------------------------------------
+# Horizontal Pod Autoscaler
+# When enabled, replicaCount is ignored — HPA controls the replica count.
+# Requires metrics-server installed in the cluster.
+# minReplicas >= 2 is recommended so the SR always has a standby leader candidate.
+# ---------------------------------------------------------------------------
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    cpu:
+      enabled: true
+      targetAverageUtilization: 70
+    memory:
+      enabled: false
+      targetAverageUtilization: 80
+  # behavior controls how fast the HPA scales up and down.
+  # scaleDown stabilization avoids flapping after a traffic spike.
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # wait 5 min before scaling down
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60             # remove at most 1 pod per minute
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60             # add at most 2 pods per minute
+
+# ---------------------------------------------------------------------------
 # PodDisruptionBudget
 # Recommended for production (replicaCount >= 2).
 # ---------------------------------------------------------------------------
