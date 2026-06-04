@@ -18,3 +18,25 @@ spec:
       protocol: TCP
   selector:
     {{- include "cp-schema-registry.selectorLabels" . | nindent 4 }}
+{{- if .Values.service.headless.enabled }}
+---
+# Headless Service — required for inter-pod leader-forwarding when replicaCount > 1.
+# Resolves to individual pod IPs so non-leader instances can proxy writes to the leader.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cp-schema-registry.fullname" . }}-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cp-schema-registry.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "cp-schema-registry.selectorLabels" . | nindent 4 }}
+{{- end }}

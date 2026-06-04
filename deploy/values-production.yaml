@@ -44,6 +44,8 @@ service:
   type: ClusterIP
   port: 8081
   annotations: {}
+  headless:
+    enabled: true   # required for inter-pod leader forwarding with replicaCount > 1
 
 # ---------------------------------------------------------------------------
 # Probes — tcpSocket: auth-agnostic, works when Basic auth is enabled.
@@ -79,20 +81,52 @@ pdb:
   maxUnavailable: ""
 
 # ---------------------------------------------------------------------------
-# Pod anti-affinity — spread replicas across AZs
+# Graceful shutdown — allow in-flight requests to complete before SIGKILL
+# ---------------------------------------------------------------------------
+terminationGracePeriodSeconds: 60
+
+# ---------------------------------------------------------------------------
+# Topology spread — even distribution across AZs (hard) and nodes (soft)
+# ---------------------------------------------------------------------------
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: cp-schema-registry
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: cp-schema-registry
+
+# ---------------------------------------------------------------------------
+# Affinity — avoid spot/preemptible nodes; spread across AZs as fallback
 # ---------------------------------------------------------------------------
 affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node.kubernetes.io/lifecycle
+              operator: NotIn
+              values: [spot]
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
         podAffinityTerm:
           labelSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - cp-schema-registry
+            matchLabels:
+              app.kubernetes.io/name: cp-schema-registry
           topologyKey: topology.kubernetes.io/zone
+      - weight: 50
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cp-schema-registry
+          topologyKey: kubernetes.io/hostname
 
 podSecurityContext:
   fsGroup: 1000
