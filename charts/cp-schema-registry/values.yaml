@@ -42,11 +42,6 @@ service:
   type: ClusterIP
   port: 8081
   annotations: {}
-  # headless: required when replicaCount > 1 so non-leader pods can proxy
-  # requests to the leader via direct pod-IP DNS (clusterIP: None).
-  # Safe to leave disabled for single-replica deployments.
-  headless:
-    enabled: false
 
 # ---------------------------------------------------------------------------
 # Schema Registry configuration overrides

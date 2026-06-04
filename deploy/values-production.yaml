@@ -44,8 +44,6 @@ service:
   type: ClusterIP
   port: 8081
   annotations: {}
-  headless:
-    enabled: true   # required for inter-pod leader forwarding with replicaCount > 1
 
 # ---------------------------------------------------------------------------
 # Probes — tcpSocket: auth-agnostic, works when Basic auth is enabled.
